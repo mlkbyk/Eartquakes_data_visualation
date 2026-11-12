@@ -27,7 +27,7 @@ def find_file(filename):
             return os.path.join(root, filename)
     return None
 
-# --- 2. VERİ YÜKLEME (prepare_data.py SÜTUNLARIYLA TAM UYUMLU) ---
+# --- 2. VERİ YÜKLEME ---
 @st.cache_data
 def load_data():
     csv_path = find_file("earthquakes_dashboard_ready.csv")
@@ -43,6 +43,7 @@ def load_data():
         np.random.seed(42)
         n = 1500
         df = pd.DataFrame({
+            'id': [f'us_{i}' for i in range(n)],
             'time': pd.date_range('2023-02-01', '2024-05-31', periods=n),
             'latitude': np.random.uniform(-60, 70, n),
             'longitude': np.random.uniform(-180, 180, n),
@@ -50,10 +51,12 @@ def load_data():
             'mag': np.random.gamma(2.2, 1.1, n).clip(4.5, 7.8).round(1),
             'magType': np.random.choice(['mww', 'mb', 'mwr', 'ml', 'md'], n, p=[0.4, 0.35, 0.15, 0.05, 0.05]),
             'magError': np.random.gamma(2.0, 0.04, n).round(3),
-            'place': ['Global Seismic Zone'] * n
+            'rms': np.random.uniform(0.1, 1.4, n).round(2),
+            'gap': np.random.uniform(15, 240, n).round(1),
+            'nst': np.random.randint(10, 160, n),
+            'place': np.random.choice(['Kermadec Islands region', 'South Sandwich Islands region', 'Kuril Islands', 'Pazarcik, Kahramanmaras, Turkiye', 'Tonga', 'Fiji region', 'Japan region', 'Chile'], n)
         })
 
-    # Zaman sütunları (prepare_data.py: 'event_date_utc' ve 'time')
     time_candidates = ['time', 'event_date_utc', 'date', 'datetime']
     time_col = next((c for c in time_candidates if c in df.columns), df.columns[0])
     df['time_parsed'] = pd.to_datetime(df[time_col], errors='coerce', utc=True)
@@ -66,7 +69,6 @@ def load_data():
     df['date_only'] = df['event_date_utc'].dt.date
     df['year_month'] = df['event_date_utc'].dt.strftime('%Y-%m')
 
-    # Yarımküre sütunu (prepare_data.py: 'latitude_hemisphere')
     hem_candidates = ['latitude_hemisphere', 'hemisphere', 'ns_hemisphere']
     found_hem = next((c for c in hem_candidates if c in df.columns), None)
     if found_hem:
@@ -74,7 +76,6 @@ def load_data():
     else:
         df['hemisphere_col'] = np.where(df['latitude'] >= 0, 'Northern', 'Southern')
 
-    # Büyüklük kategorisi (prepare_data.py: 'magnitude_band')
     mag_cat_candidates = ['magnitude_band', 'mag_category', 'magnitude_category']
     found_mag_cat = next((c for c in mag_cat_candidates if c in df.columns), None)
     if found_mag_cat:
@@ -86,7 +87,6 @@ def load_data():
             labels=['M4.5–4.9', 'M5.0–5.9', 'M6.0–6.9', 'M7.0+']
         ).astype(str)
 
-    # Derinlik kategorisi (prepare_data.py: 'depth_category')
     depth_cat_candidates = ['depth_category', 'depth_cat', 'depth_class']
     found_depth_cat = next((c for c in depth_cat_candidates if c in df.columns), None)
     if found_depth_cat:
@@ -98,7 +98,6 @@ def load_data():
             labels=['Shallow (<70 km)', 'Intermediate (70–299 km)', 'Deep (>=300 km)']
         ).astype(str)
 
-    # 10 km sabit derinlik bayrağı (prepare_data.py: 'depth_exactly_10km')
     if 'depth_exactly_10km' not in df.columns:
         df['depth_exactly_10km'] = (df['depth'] == 10.0).astype(str)
 
@@ -243,10 +242,10 @@ st.markdown(f"""
         box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05) !important;
     }}
     button[data-baseweb="tab"] {{
-        font-size: 0.98rem !important;
+        font-size: 0.96rem !important;
         font-weight: 600 !important;
         color: {text_secondary} !important;
-        padding: 10px 16px !important;
+        padding: 10px 14px !important;
     }}
     button[data-baseweb="tab"][aria-selected="true"] {{
         color: {accent_col} !important;
@@ -263,7 +262,6 @@ st.markdown(f"""
         font-size: 0.95rem;
         box-shadow: 0 3px 10px rgba(15, 23, 42, 0.04);
     }}
-    /* Üye 2 Bilimsel Açıklama Kartı */
     .sci-card {{
         background-color: {bg_card};
         border: 1px solid {border_col};
@@ -283,7 +281,6 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# Üye 2 Bilimsel Bilgi Kartı Bileşeni (preview_statistical.py -> show_insight)
 def show_scientific_card(main_text: str, note_text: str):
     st.markdown(
         f"""
@@ -298,7 +295,6 @@ def show_scientific_card(main_text: str, note_text: str):
         unsafe_allow_html=True
     )
 
-# Harita Çizici Fonksiyon
 def render_interactive_map(df_plot, lat_col, lon_col, color_col, size_col=None, hover_name=None, hover_data=None, zoom=1.3, center=None, height=550, color_scale=color_scale_main, discrete_seq=None, labels=None, title=None, animation_frame=None):
     use_new_api = hasattr(px, "scatter_map")
     plot_fn = px.scatter_map if use_new_api else px.scatter_mapbox
@@ -329,7 +325,7 @@ def render_interactive_map(df_plot, lat_col, lon_col, color_col, size_col=None, 
     return fig
 
 # =========================================================================
-# ÜYE 2 GRAFİK ÜRETİCİ FONKSİYONLARI (preview_statistical.py ENTEGRASYONU)
+# ÜYE 2 GRAFİK ÜRETİCİ FONKSİYONLARI
 # =========================================================================
 def build_u2_density_contour(data: pd.DataFrame, view_mode: str, is_binned: bool):
     d_plot = data.copy()
@@ -337,7 +333,6 @@ def build_u2_density_contour(data: pd.DataFrame, view_mode: str, is_binned: bool
         d_plot = d_plot[(d_plot["mag"] <= 6.8) & (d_plot["depth"] <= 250)]
     
     if is_binned:
-        # Detailed Bins: 0.05 magnitude x 10 km depth
         nbinsx = max(10, int((d_plot["mag"].max() - d_plot["mag"].min()) / 0.05)) if not d_plot.empty else 30
         nbinsy = max(10, int((d_plot["depth"].max() - d_plot["depth"].min()) / 10.0)) if not d_plot.empty else 30
         title_txt = f"Detaylı Histogram Yoğunluk Konturu (0.05 Mw × 10 km Bin) — {view_mode}"
@@ -383,12 +378,9 @@ def build_u2_calendar_heatmap(data: pd.DataFrame, year: int, visible_start, visi
     cal_df = pd.DataFrame({"date": all_days})
     cal_df["count"] = cal_df["date"].map(daily_counts).fillna(0).astype(int)
     cal_df["in_range"] = (cal_df["date"].dt.date >= visible_start) & (cal_df["date"].dt.date <= visible_end)
-    
-    # Seçili aralık dışındaki günleri NaN yaparak gri gösterme
     cal_df["z_val"] = np.where(cal_df["in_range"], np.log1p(cal_df["count"]), np.nan)
-    cal_df["weekday"] = cal_df["date"].dt.weekday  # 0=Mon, 6=Sun
+    cal_df["weekday"] = cal_df["date"].dt.weekday
     
-    # Yılın ilk gününe göre hafta indeksi
     first_monday = start_yr - pd.Timedelta(days=start_yr.weekday())
     cal_df["week_idx"] = ((cal_df["date"] - first_monday).dt.days // 7)
 
@@ -408,7 +400,6 @@ def build_u2_calendar_heatmap(data: pd.DataFrame, year: int, visible_start, visi
         else:
             text_matrix[d, w] = f"<b>{d_str}</b><br>Veri/Filtre Aralığı Dışında"
 
-    # Ay başlangıç etiketleri
     month_ticks, month_labels = [], []
     for m in range(1, 13):
         m_date = pd.Timestamp(year=year, month=m, day=1)
@@ -433,7 +424,6 @@ def build_u2_calendar_heatmap(data: pd.DataFrame, year: int, visible_start, visi
         )
     ))
 
-    # 2023 yılında 6 Şubat gününü Kehribar (Amber) çerçeve ile işaretleme (Üye 2 özelliği)
     if year == 2023:
         feb6 = pd.Timestamp("2023-02-06")
         w_f6 = int((feb6 - first_monday).days // 7)
@@ -501,7 +491,6 @@ hemispheres = st.sidebar.multiselect(
     default=sorted(df['hemisphere_col'].dropna().unique())
 )
 
-# Üye 2'nin özel bilimsel filtresi: 10 km sabit derinlik kontrolü
 include_10km = st.sidebar.checkbox(
     "Tam 10 km kaydedilen derinlikleri dahil et (depth_exactly_10km)",
     value=True,
@@ -537,7 +526,7 @@ st.markdown(f"""
     <div class='hero-banner'>
         <h1 style='margin:0; font-size:2.1rem; color:{text_primary};'>🌍 SEISMOSCOPE — Küresel Deprem Analiz Platformu</h1>
         <p style='margin:6px 0 0 0; color:{text_secondary}; font-size:1.02rem;'>
-            <b>USGS M4.5+ Küresel Sismik Veri Seti (1 Şubat 2023 – 31 Mayıs 2024)</b> &nbsp;|&nbsp; Coğrafi, İstatistiksel, Zamansal ve Makine Öğrenmesi Karar Destek Sistemi
+            <b>USGS M4.5+ Küresel Sismik Veri Seti (1 Şubat 2023 – 31 Mayıs 2024)</b> &nbsp;|&nbsp; 9 Özgün Görselleştirme, Makine Öğrenmesi ve 6 Şubat Karar Destek Sistemi
         </p>
     </div>
 """, unsafe_allow_html=True)
@@ -560,13 +549,13 @@ if not filtered_df.empty:
         unsafe_allow_html=True
     )
 
-# --- 5. NAVİGASYON (SEKMELER) ---
+# --- 5. NAVİGASYON (SEKMELER - 9 GÖRSELLEŞTİRME + ML + 6 ŞUBAT) ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🗺️ Coğrafi & Kategorik Analiz (Üye 1)", 
-    "📈 İstatistiksel & Zamansal Analiz (Üye 2)", 
-    "📊 Üye 3 Analizleri",
+    "🗺️ Coğrafi & Kategorik (Üye 1)", 
+    "📈 İstatistiksel & Zamansal (Üye 2)", 
+    "🧊 Çok Boyutlu & 3B Analiz (Üye 3)",
     "🤖 Makine Öğrenmesi (K-Means & DT)", 
-    "🇹🇷 6 Şubat 2023 Türkiye & Dalga Simülatörü"
+    "🇹🇷 6 Şubat Türkiye & Dalga Simülatörü"
 ])
 
 # ==========================================
@@ -709,7 +698,7 @@ with tab1:
             st.plotly_chart(fig_sunburst, use_container_width=True)
 
 # =========================================================================
-# SEKME 2: ÜYE 2 — İSTATİSTİKSEL VE ZAMANSAL ANALİZ (preview_statistical.py)
+# SEKME 2: ÜYE 2 — İSTATİSTİKSEL VE ZAMANSAL ANALİZ
 # =========================================================================
 with tab2:
     st.subheader("📈 İstatistiksel ve Zamansal Analiz (Üye 2 — Statistical & Temporal Lead)")
@@ -719,15 +708,14 @@ with tab2:
         st.warning("⚠️ Seçilen filtre kriterlerine uygun deprem kaydı bulunamadı.")
     else:
         u2_choices = [
-            "1. Density Contour (Büyüklük × Derinlik Yoğunluğu)",
-            "2. Violin Plot (Yöntemlere Göre Ölçüm Belirsizliği)",
-            "3. Calendar Heatmap (Günlük Deprem Aktivite Takvimi)"
+            "4. Density Contour (Büyüklük × Derinlik Yoğunluğu)",
+            "5. Violin Plot (Yöntemlere Göre Ölçüm Belirsizliği)",
+            "6. Calendar Heatmap (Günlük Deprem Aktivite Takvimi)"
         ]
-        chosen_u2 = st.radio("İncelenecek Görselleştirmeyi Seçin:", u2_choices, horizontal=True)
+        chosen_u2 = st.radio("İncelenecek Görselleştirmeyi Seçin (Üye 2):", u2_choices, horizontal=True)
         st.markdown("---")
 
-        # --- ÜYE 2 GÖRSELLEŞTİRME 1: DENSITY CONTOUR ---
-        if chosen_u2.startswith("1."):
+        if chosen_u2.startswith("4."):
             h_col, c_col = st.columns([3, 1])
             with h_col:
                 st.markdown("#### Magnitude × Depth Density Contour")
@@ -759,8 +747,7 @@ with tab2:
                         "Özellikle 10 km derinlik çizgisindeki yatay yoğunlaşma sismolojik kataloglama standartlarından kaynaklanır."
                     )
 
-        # --- ÜYE 2 GÖRSELLEŞTİRME 2: VIOLIN PLOT ---
-        elif chosen_u2.startswith("2."):
+        elif chosen_u2.startswith("5."):
             st.markdown("#### Magnitude Uncertainty by Estimation Method (Violin Plot)")
             st.caption("Deprem büyüklüğü tahmin yöntemleri (`magType`) arasında raporlanan büyüklük belirsizliğini (`magError`) karşılaştırın.")
 
@@ -817,8 +804,7 @@ with tab2:
                     )
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-        # --- ÜYE 2 GÖRSELLEŞTİRME 3: CALENDAR HEATMAP ---
-        elif chosen_u2.startswith("3."):
+        elif chosen_u2.startswith("6."):
             st.markdown("#### Daily Earthquake Activity Calendar (Günlük Deprem Takvimi)")
             st.caption("Günlük M4.5+ deprem sayılarını UTC tarihlerine göre inceleyin. 2023 görünümünde 6 Şubat kehribar (amber) çerçeve ile işaretlenmiştir.")
 
@@ -875,12 +861,219 @@ with tab2:
                 top_days["UTC Tarih"] = top_days["UTC Tarih"].dt.strftime("%d %b %Y")
                 st.dataframe(top_days, use_container_width=True, hide_index=True)
 
-# ==========================================
-# SEKME 3: ÜYE 3 ENTEGRASYON ALANI
-# ==========================================
+# =========================================================================
+# SEKME 3: ÜYE 3 — ÇOK BOYUTLU VE 3B ANALİZ (dataviz.txt ENTEGRASYONU)
+# =========================================================================
 with tab3:
-    st.subheader("📊 Üye 3 Analiz Grafikleri")
-    st.info("Üye 3'ün kodları geldiğinde tıpkı Üye 2'de olduğu gibi doğrudan bu sekmeye entegre edilecektir.")
+    st.subheader("🧊 Çok Boyutlu, Lokasyon ve 3B Analiz (Üye 3 — Multidimensional & 3D Lead)")
+    st.caption("Lokasyon bazlı Treemap dağılımı, 6 boyutlu ölçüm kalitesi Parallel Coordinates analizi ve 3 boyutlu küresel hiposantr (3D Scatter) görselleştirmesi.")
+
+    if filtered_df.empty:
+        st.warning("⚠️ Seçilen filtre kriterlerine uygun deprem kaydı bulunamadı.")
+    else:
+        u3_choices = [
+            "7. Treemap (Lokasyonlara Göre Küresel Deprem Dağılımı)",
+            "8. Parallel Coordinates (Çok Boyutlu Deprem ve Ölçüm Kalitesi Analizi)",
+            "9. 3D Scatter Plot (3 Boyutlu Küresel Deprem ve Derinlik Dağılımı)"
+        ]
+        chosen_u3 = st.radio("İncelenecek Görselleştirmeyi Seçin (Üye 3):", u3_choices, horizontal=True)
+        st.markdown("---")
+
+        # --- ÜYE 3 GÖRSELLEŞTİRME 7: TREEMAP ---
+        if chosen_u3.startswith("7."):
+            col_tm_ctrl1, col_tm_ctrl2 = st.columns([1, 2])
+            with col_tm_ctrl1:
+                top_n_places = st.slider("Gösterilecek En Aktif Lokasyon Sayısı (Top N):", min_value=5, max_value=30, value=15, step=5)
+            with col_tm_ctrl2:
+                tm_color_mode = st.radio(
+                    "Treemap Renk Skalası:",
+                    ["Üye 3 Özel Palet (#24476B ➔ #E87555)", "RdYlBu_r (Kırmızı-Sarı-Mavi)"],
+                    horizontal=True
+                )
+
+            id_col = "id" if "id" in filtered_df.columns else "mag"
+            tm_data = filtered_df[["place", "mag", id_col]].dropna().copy()
+            summary_tm = (
+                tm_data.groupby("place")
+                .agg(
+                    earthquake_count=(id_col, "count"),
+                    avg_magnitude=("mag", "mean")
+                )
+                .reset_index()
+                .sort_values("earthquake_count", ascending=False)
+                .head(top_n_places)
+            )
+
+            custom_u3_scale = ["#24476B", "#4C789A", "#F4C66A", "#E87555"] if tm_color_mode.startswith("Üye 3") else "RdYlBu_r"
+
+            ch_col, nt_col = st.columns([3.4, 1.3], gap="large")
+            with ch_col:
+                fig_tm = px.treemap(
+                    summary_tm,
+                    path=["place"],
+                    values="earthquake_count",
+                    color="avg_magnitude",
+                    color_continuous_scale=custom_u3_scale,
+                    hover_data={"earthquake_count": True, "avg_magnitude": ":.2f"},
+                    title=f"Global Earthquake Distribution by Location (İlk {top_n_places} Konum)"
+                )
+                fig_tm.update_traces(
+                    textinfo="label+value",
+                    marker=dict(line=dict(color="white", width=2)),
+                    hovertemplate=(
+                        "<b>%{label}</b><br>"
+                        "Earthquake Count: %{value}<br>"
+                        "Average Magnitude: %{color:.2f} Mw"
+                        "<extra></extra>"
+                    )
+                )
+                fig_tm.update_layout(
+                    height=600,
+                    title_x=0.5,
+                    margin=dict(t=60, l=15, r=15, b=15),
+                    paper_bgcolor=bg_card,
+                    font=dict(color=text_primary, size=13)
+                )
+                st.plotly_chart(fig_tm, use_container_width=True, key="u3_treemap")
+
+            with nt_col:
+                show_scientific_card(
+                    "Her dikdörtgenin alanı o lokasyonda kaydedilen toplam deprem sayısını (`earthquake_count`), rengi ise o bölgedeki ortalama deprem büyüklüğünü (`avg_magnitude`) gösterir.",
+                    "USGS 'place' sütunu merkez üssüne en yakın coğrafi referans noktasını verir. Aynı fay hattı üzerindeki farklı alt bölgeler ayrı kutular halinde listelenebilir."
+                )
+                st.markdown("##### 📊 İlk 15 Konum Özeti")
+                st.dataframe(
+                    summary_tm.rename(columns={"place": "Konum", "earthquake_count": "Kayıt", "avg_magnitude": "Ort. Mw"}).round(2),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=260
+                )
+
+        # --- ÜYE 3 GÖRSELLEŞTİRME 8: PARALLEL COORDINATES ---
+        elif chosen_u3.startswith("8."):
+            st.markdown("#### Multidimensional Earthquake Analysis (Magnitude, Depth & Measurement Quality)")
+            st.caption("Eksenlerin üzerindeki dikey aralıkları fareyle sürükleyerek (brushing) belirli büyüklük, derinlik, istasyon sayısı ve hata aralıklarını filtreleyebilirsiniz.")
+
+            par_cols = ["mag", "depth", "rms", "gap", "nst", "magError"]
+            missing_cols = [c for c in par_cols if c not in filtered_df.columns]
+
+            if missing_cols:
+                st.warning(f"Veri setinde şu sütunlar bulunamadı: {missing_cols}")
+            else:
+                parallel_df = filtered_df[par_cols].dropna().copy()
+                orig_cnt = len(filtered_df)
+                used_cnt = len(parallel_df)
+                rem_cnt = orig_cnt - used_cnt
+
+                pk1, pk2, pk3 = st.columns(3)
+                pk1.metric("Toplam Seçili Kayıt (Original records)", f"{orig_cnt:,}")
+                pk2.metric("Analizde Kullanılan Tam Kayıt (Records used)", f"{used_cnt:,}")
+                pk3.metric("Eksik Ölçüm Nedeniyle Çıkarılan (Removed)", f"{rem_cnt:,}")
+
+                if parallel_df.empty:
+                    st.info("Seçilen filtrelerde 6 ölçüm parametresinin tamamına sahip kayıt bulunamadı.")
+                else:
+                    fig_par = go.Figure(
+                        data=go.Parcoords(
+                            line=dict(
+                                color=parallel_df["mag"],
+                                colorscale=[
+                                    [0.0, "#24476B"],
+                                    [0.35, "#4C789A"],
+                                    [0.65, "#F4C66A"],
+                                    [1.0, "#E87555"]
+                                ],
+                                cmin=float(parallel_df["mag"].min()),
+                                cmax=float(parallel_df["mag"].max()),
+                                colorbar=dict(title="Magnitude (Mw)"),
+                                showscale=True
+                            ),
+                            dimensions=[
+                                dict(label="Magnitude (Mw)", values=parallel_df["mag"]),
+                                dict(label="Depth (km)", values=parallel_df["depth"]),
+                                dict(label="RMS (Seyahat Süresi Kalıntısı)", values=parallel_df["rms"]),
+                                dict(label="Azimuthal Gap (°)", values=parallel_df["gap"]),
+                                dict(label="Number of Stations (nst)", values=parallel_df["nst"]),
+                                dict(label="Magnitude Error (magError)", values=parallel_df["magError"])
+                            ]
+                        )
+                    )
+                    fig_par.update_layout(
+                        title=dict(
+                            text="Multidimensional Earthquake Analysis — Magnitude, Depth and Measurement Quality",
+                            x=0.5
+                        ),
+                        height=620,
+                        margin=dict(l=80, r=80, t=90, b=50),
+                        paper_bgcolor=bg_card,
+                        plot_bgcolor=bg_card,
+                        font=dict(family="Arial", size=12, color=text_primary)
+                    )
+                    st.plotly_chart(fig_par, use_container_width=True, key="u3_parcoords")
+
+                    show_scientific_card(
+                        "Her bir çizgi tek bir depremi temsil eder. Eksenler üzerinde basılı tutup sürükleyerek yüksek istasyon sayılı (`nst`) ve düşük azimut boşluklu (`gap`) kaliteli ölçümleri izole edebilirsiniz.",
+                        "Azimuthal Gap (istasyonlar arası açısal boşluk) küçüldükçe ve istasyon sayısı (`nst`) arttıkça depremin konum/büyüklük belirsizliği (`magError`) azalma eğilimi gösterir."
+                    )
+
+        # --- ÜYE 3 GÖRSELLEŞTİRME 9: 3D SCATTER PLOT ---
+        elif chosen_u3.startswith("9."):
+            st.markdown("#### 3D Global Earthquake Distribution (Boylam × Enlem × Derinlik)")
+            
+            c3d_1, c3d_2 = st.columns([2, 2])
+            with c3d_1:
+                show_10km_3d = st.checkbox(
+                    "Tam 10 km derinlik kayıtlarını 3B uzayda göster (show_10km)",
+                    value=True,
+                    help="İşareti kaldırdığınızda depth == 10 km olan varsayılan kayıtlar gizlenir ve gerçek derinlik katmanları netleşir."
+                )
+            with c3d_2:
+                marker_sz_3d = st.slider("3B Nokta Boyutu (Marker Size):", min_value=2, max_value=7, value=3)
+
+            cols_3d = ["latitude", "longitude", "depth", "mag", "place"]
+            scatter_df = filtered_df[cols_3d].dropna().copy()
+
+            if show_10km_3d:
+                display_3d_df = scatter_df.copy()
+            else:
+                display_3d_df = scatter_df[scatter_df["depth"] != 10].copy()
+
+            st.caption(f"📌 **3B Uzayda Gösterilen Kayıt Sayısı (Displayed records):** `{len(display_3d_df):,}` deprem (Fareyle döndürebilir ve yakınlaştırabilirsiniz)")
+
+            ch_col, nt_col = st.columns([3.5, 1.2], gap="large")
+            with ch_col:
+                fig_3d = px.scatter_3d(
+                    display_3d_df,
+                    x="longitude",
+                    y="latitude",
+                    z="depth",
+                    color="mag",
+                    hover_name="place",
+                    hover_data={"latitude": ":.2f", "longitude": ":.2f", "depth": ":.1f", "mag": ":.1f"},
+                    color_continuous_scale="RdYlBu_r",
+                    title="3D Global Earthquake Distribution (Z Ekseni: Yüzeyden Derine)"
+                )
+                fig_3d.update_traces(marker=dict(size=marker_sz_3d, opacity=0.78))
+                fig_3d.update_layout(
+                    height=680,
+                    margin=dict(l=10, r=10, t=50, b=10),
+                    paper_bgcolor=bg_card,
+                    font=dict(color=text_primary),
+                    scene=dict(
+                        xaxis_title="Longitude (Boylam)",
+                        yaxis_title="Latitude (Enlem)",
+                        zaxis_title="Depth (km)",
+                        zaxis=dict(autorange="reversed"),
+                        bgcolor=input_bg
+                    )
+                )
+                st.plotly_chart(fig_3d, use_container_width=True, key="u3_scatter3d")
+
+            with nt_col:
+                show_scientific_card(
+                    "Z ekseni ters çevrilmiştir (`autorange='reversed'`); böylece yerkabuğu yüzeyi (0 km) en üstte, 600+ km derinliğindeki dalma-batma zonu (subduction zone) depremleri ise altta gerçek fiziksel konumuyla görünür.",
+                    "'show_10km' kutusunu kapattığınızda yüzeyin hemen altındaki yapay 10 km düzlemi kaybolur ve Pasifik Ateş Çemberi boyunca derine dalan Wadati-Benioff kuşakları 3 boyutlu olarak ortaya çıkar."
+                )
 
 # ==========================================
 # SEKME 4: GERÇEK ML EĞİTİM SONUÇLARI
