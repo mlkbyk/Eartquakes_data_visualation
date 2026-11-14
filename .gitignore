@@ -1,0 +1,29 @@
+# Virtual environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Local IDE and secrets
+.vscode/
+.idea/
+.env
+.env.*
+.streamlit/secrets.toml
+# OS / temporary artifacts
+.DS_Store
+Thumbs.db
+*.log
+.ipynb_checkpoints/
+# Generated ad-hoc exports and scratch files
+exports/
+*.tmp
+
+# Local backups and archived development versions
+backups/
+
+# Temporary integration and patch directories
+__*_temp/
+

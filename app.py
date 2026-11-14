@@ -1,1401 +1,979 @@
-import streamlit as st
-import pandas as pd
+"""SEISMOSCOPE — Seismic Intelligence v4 / six-view research dashboard.
+
+Run from the SEISMOSCOPE project root:
+    python -m streamlit run app_seismic_v4.py
+
+The nine graded visualizations come directly from the three tested member
+packages in charts/. The ML section uses real saved training artifacts in ml/.
+No synthetic earthquake data or substitute charts are created here.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import joblib
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import os
+import streamlit as st
 
-# --- 0. STREAMLIT ÇEKİRDEK AÇIK TEMA KONFİGÜRASYONU ---
-os.makedirs(".streamlit", exist_ok=True)
-config_path = os.path.join(".streamlit", "config.toml")
-if not os.path.exists(config_path):
-    with open(config_path, "w", encoding="utf-8") as f:
-        f.write('[theme]\nbase="light"\nprimaryColor="#0284c7"\nbackgroundColor="#f4f7fb"\nsecondaryBackgroundColor="#ffffff"\ntextColor="#0f172a"\n')
+from charts.geographic.geographic_categorical import (
+    create_geographic_map,
+    create_sankey_diagram,
+    create_sunburst,
+)
+from charts.multidimensional.multidimensional import (
+    complete_measurements,
+    create_parallel_coordinates,
+    create_scatter_3d,
+    create_treemap,
+    prepare_3d_data,
+    summarize_locations,
+)
+from charts.statistical.statistical_temporal import (
+    create_calendar_heatmap,
+    create_density_contour_binned,
+    create_density_contour_smoothed,
+    create_violin_plot,
+)
+from ml.features import classification_features, clustering_features
+from ml.ml_dashboard import render_ml_section
 
-# --- 1. SAYFA AYARLARI ---
+
+ROOT = Path(__file__).resolve().parent
+DATA_PATH = ROOT / "data" / "earthquakes_dashboard_ready.csv"
+REFERENCE_PATH = ROOT / "data" / "kahramanmaras_6feb_major_events_reference.csv"
+MODELS_DIR = ROOT / "ml" / "models"
+REPORTS_DIR = ROOT / "ml" / "reports"
+TEAL = "#0F766E"
+SLATE = "#0F172A"
+
 st.set_page_config(
-    page_title="SEISMOSCOPE | Earthquake Analytics",
-    page_icon="🌍",
+    page_title="SEISMOSCOPE | Earthquake Data Explorer",
+    page_icon="🌐",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# --- YARDIMCI FONKSİYON: KLASÖRLERDE DOSYA BULUCU ---
-def find_file(filename):
-    for root, dirs, files in os.walk("."):
-        if filename in files:
-            return os.path.join(root, filename)
-    return None
-
-# --- 2. VERİ YÜKLEME ---
-@st.cache_data
-def load_data():
-    csv_path = find_file("earthquakes_dashboard_ready.csv")
-    scored_path = find_file("ml_scored_events.csv")
-    is_mock = False
-
-    if csv_path:
-        df = pd.read_csv(csv_path)
-    elif scored_path:
-        df = pd.read_csv(scored_path)
-    else:
-        is_mock = True
-        np.random.seed(42)
-        n = 1500
-        df = pd.DataFrame({
-            'id': [f'us_{i}' for i in range(n)],
-            'time': pd.date_range('2023-02-01', '2024-05-31', periods=n),
-            'latitude': np.random.uniform(-60, 70, n),
-            'longitude': np.random.uniform(-180, 180, n),
-            'depth': np.random.exponential(60, n).clip(1, 650).round(1),
-            'mag': np.random.gamma(2.2, 1.1, n).clip(4.5, 7.8).round(1),
-            'magType': np.random.choice(['mww', 'mb', 'mwr', 'ml', 'md'], n, p=[0.4, 0.35, 0.15, 0.05, 0.05]),
-            'magError': np.random.gamma(2.0, 0.04, n).round(3),
-            'rms': np.random.uniform(0.1, 1.4, n).round(2),
-            'gap': np.random.uniform(15, 240, n).round(1),
-            'nst': np.random.randint(10, 160, n),
-            'place': np.random.choice(['Kermadec Islands region', 'South Sandwich Islands region', 'Kuril Islands', 'Pazarcik, Kahramanmaras, Turkiye', 'Tonga', 'Fiji region', 'Japan region', 'Chile'], n)
-        })
-
-    time_candidates = ['time', 'event_date_utc', 'date', 'datetime']
-    time_col = next((c for c in time_candidates if c in df.columns), df.columns[0])
-    df['time_parsed'] = pd.to_datetime(df[time_col], errors='coerce', utc=True)
-    
-    if 'event_date_utc' in df.columns:
-        df['event_date_utc'] = pd.to_datetime(df['event_date_utc'], errors='coerce')
-    else:
-        df['event_date_utc'] = pd.to_datetime(df['time_parsed'].dt.strftime('%Y-%m-%d'))
-
-    df['date_only'] = df['event_date_utc'].dt.date
-    df['year_month'] = df['event_date_utc'].dt.strftime('%Y-%m')
-
-    hem_candidates = ['latitude_hemisphere', 'hemisphere', 'ns_hemisphere']
-    found_hem = next((c for c in hem_candidates if c in df.columns), None)
-    if found_hem:
-        df['hemisphere_col'] = df[found_hem].astype(str)
-    else:
-        df['hemisphere_col'] = np.where(df['latitude'] >= 0, 'Northern', 'Southern')
-
-    mag_cat_candidates = ['magnitude_band', 'mag_category', 'magnitude_category']
-    found_mag_cat = next((c for c in mag_cat_candidates if c in df.columns), None)
-    if found_mag_cat:
-        df['mag_cat_col'] = df[found_mag_cat].astype(str)
-    else:
-        df['mag_cat_col'] = pd.cut(
-            df['mag'],
-            bins=[-1, 4.999, 5.999, 6.999, 10],
-            labels=['M4.5–4.9', 'M5.0–5.9', 'M6.0–6.9', 'M7.0+']
-        ).astype(str)
-
-    depth_cat_candidates = ['depth_category', 'depth_cat', 'depth_class']
-    found_depth_cat = next((c for c in depth_cat_candidates if c in df.columns), None)
-    if found_depth_cat:
-        df['depth_cat_col'] = df[found_depth_cat].astype(str)
-    else:
-        df['depth_cat_col'] = pd.cut(
-            df['depth'],
-            bins=[-10, 69.999, 299.999, 1000],
-            labels=['Shallow (<70 km)', 'Intermediate (70–299 km)', 'Deep (>=300 km)']
-        ).astype(str)
-
-    if 'depth_exactly_10km' not in df.columns:
-        df['depth_exactly_10km'] = (df['depth'] == 10.0).astype(str)
-
-    return df, is_mock
-
-df, is_mock = load_data()
-
-# --- 3. SIDEBAR: GÖRÜNÜM TEMASI VE KÜRESEL FİLTRELER ---
-st.sidebar.markdown("## 🌍 **SEISMOSCOPE**")
-st.sidebar.caption("Global Seismic Intelligence & Visual Analytics")
-
-ui_theme = st.sidebar.radio(
-    "🎨 Ekran Teması:",
-    ["☀️ Ferah Açık (Sunum Önerisi)", "🌌 Yumuşak Gece Mavisi"],
-    index=0
-)
-
-is_light = ui_theme.startswith("☀️")
-
-if is_light:
-    bg_main = "#f4f7fb"
-    bg_card = "#ffffff"
-    bg_sidebar = "#ffffff"
-    input_bg = "#f8fafc"
-    text_primary = "#0f172a"
-    text_secondary = "#475569"
-    border_col = "#cbd5e1"
-    accent_col = "#0284c7"
-    map_tile = "carto-positron"
-    globe_ocean = "#e0f2fe"
-    globe_land = "#f8fafc"
-    globe_border = "#94a3b8"
-    color_scale_main = "Spectral_r"
-else:
-    bg_main = "#0f172a"
-    bg_card = "#1e293b"
-    bg_sidebar = "#1e293b"
-    input_bg = "#334155"
-    text_primary = "#f8fafc"
-    text_secondary = "#cbd5e1"
-    border_col = "#475569"
-    accent_col = "#38bdf8"
-    map_tile = "carto-darkmatter"
-    globe_ocean = "#0f172a"
-    globe_land = "#1e293b"
-    globe_border = "#475569"
-    color_scale_main = "Turbo"
-
-# --- KAPSAMLI CSS ---
-st.markdown(f"""
+st.markdown(
+    """
     <style>
-    header[data-testid="stHeader"] {{
-        background-color: {bg_main} !important;
-        border-bottom: none !important;
-    }}
-    .stApp {{
-        background-color: {bg_main} !important;
-        color: {text_primary} !important;
-    }}
-    .block-container {{
-        padding-top: 1.2rem !important;
-        padding-bottom: 2rem !important;
-    }}
-    section[data-testid="stSidebar"] {{
-        background-color: {bg_sidebar} !important;
-        border-right: 1px solid {border_col} !important;
-    }}
-    section[data-testid="stSidebar"] * {{
-        color: {text_primary} !important;
-    }}
-    div[data-baseweb="select"] > div,
-    div[data-baseweb="input"] > div,
-    div[data-baseweb="base-input"],
-    input[type="text"],
-    div[data-testid="stDateInput"] div {{
-        background-color: {input_bg} !important;
-        color: {text_primary} !important;
-        border-color: {border_col} !important;
-        border-radius: 8px !important;
-    }}
-    div[data-baseweb="popover"] div,
-    ul[data-baseweb="menu"],
-    li[role="option"] {{
-        background-color: {bg_card} !important;
-        color: {text_primary} !important;
-    }}
-    li[role="option"]:hover {{
-        background-color: {input_bg} !important;
-    }}
-    span[data-baseweb="tag"] {{
-        background-color: {accent_col} !important;
-        color: #ffffff !important;
-        border-radius: 6px !important;
-        font-weight: 600 !important;
-    }}
-    span[data-baseweb="tag"] span {{
-        color: #ffffff !important;
-    }}
-    div[data-testid="stDownloadButton"] button {{
-        background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
-        color: #ffffff !important;
-        border: none !important;
-        border-radius: 10px !important;
-        padding: 0.6rem 1rem !important;
-        font-weight: 600 !important;
-        box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25) !important;
-    }}
-    div[data-testid="stDownloadButton"] button * {{
-        color: #ffffff !important;
-    }}
-    .hero-banner {{
-        background: linear-gradient(135deg, {bg_card} 0%, {input_bg} 100%);
-        border: 1px solid {border_col};
-        border-left: 6px solid {accent_col};
-        border-radius: 14px;
-        padding: 18px 24px;
-        margin-bottom: 18px;
-        box-shadow: 0 4px 15px rgba(15, 23, 42, 0.05);
-    }}
-    div[data-testid="metric-container"] {{
-        background-color: {bg_card} !important;
-        border: 1px solid {border_col} !important;
-        border-top: 4px solid {accent_col} !important;
-        padding: 16px 20px !important;
-        border-radius: 12px !important;
-        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05) !important;
-    }}
-    div[data-testid="stMetricValue"] {{
-        color: {text_primary} !important;
-        font-weight: 800 !important;
-    }}
-    div[data-testid="stMetricLabel"] {{
-        color: {text_secondary} !important;
-        font-size: 0.92rem !important;
-        font-weight: 600 !important;
-    }}
-    div[data-testid="stPlotlyChart"] {{
-        background-color: {bg_card} !important;
-        border: 1px solid {border_col} !important;
-        border-radius: 14px !important;
-        padding: 10px !important;
-        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05) !important;
-    }}
-    button[data-baseweb="tab"] {{
-        font-size: 0.96rem !important;
-        font-weight: 600 !important;
-        color: {text_secondary} !important;
-        padding: 10px 14px !important;
-    }}
-    button[data-baseweb="tab"][aria-selected="true"] {{
-        color: {accent_col} !important;
-    }}
-    .insight-box {{
-        background-color: {bg_card};
-        border: 1px solid {border_col};
-        border-left: 5px solid #10b981;
-        border-radius: 12px;
-        padding: 14px 20px;
-        margin-top: 10px;
-        margin-bottom: 18px;
-        color: {text_primary};
-        font-size: 0.95rem;
-        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.04);
-    }}
-    .sci-card {{
-        background-color: {bg_card};
-        border: 1px solid {border_col};
-        border-top: 4px solid #0d9488;
-        border-radius: 12px;
-        padding: 16px;
-        color: {text_primary};
-        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
-    }}
-    .sci-note {{
-        margin-top: 12px;
-        padding-top: 10px;
-        border-top: 1px dashed {border_col};
-        font-size: 0.88rem;
-        color: {text_secondary};
-    }}
+    /* SEISMOSCOPE v4 — Seismic Intelligence visual identity */
+    :root { --navy:#0F172A; --navy2:#172B4D; --teal:#0F766E;
+            --indigo:#6366F1; --amber:#F59E0B; --slate:#64748B;
+            --bg:#F8FAFC; --line:#DFE7EF; }
+    .stApp { background:var(--bg); color:var(--navy); font-family:'Segoe UI',Arial,sans-serif; }
+    [data-testid="stMainBlockContainer"], .block-container {
+        max-width:1640px; padding-top:1.15rem; padding-bottom:2.3rem; }
+    h1,h2,h3 { letter-spacing:-.025em; color:var(--navy); }
+    [data-testid="stSidebar"] { background:#EDF3F7; border-right:1px solid #DCE5EC; }
+    [data-testid="stSidebar"] .block-container { padding-top:1.4rem; }
+    [data-testid="stSidebar"] label { font-weight:600; color:#334155; }
+    .ss-brand-shell { background:linear-gradient(135deg,#0F172A,#203B59);
+        margin:0 0 1.15rem; padding:17px 16px; border-radius:13px;
+        border-bottom:3px solid #0D9488; box-shadow:0 8px 18px rgba(15,23,42,.08); }
+    .ss-brand-name { color:#FFFFFF; font-weight:850; letter-spacing:.095em;
+        font-size:1.14rem; line-height:1.1; }
+    .ss-brand-kicker { color:#99F6E4; font-weight:700; letter-spacing:.14em;
+        font-size:.63rem; margin-bottom:.5rem; }
+    .ss-brand-sub { color:#CBD5E1; margin-top:.5rem; font-size:.7rem; }
+    .ss-hero { position:relative; overflow:hidden; border-radius:17px;
+        background:linear-gradient(112deg,#0F172A 8%,#172B4D 58%,#1B4A56 100%);
+        min-height:184px; padding:28px 34px; color:white;
+        display:flex; gap:2rem; align-items:center; justify-content:space-between;
+        box-shadow:0 10px 30px rgba(15,23,42,.12); margin:0 0 1.0rem; }
+    .ss-hero:after { content:''; position:absolute; width:350px; height:350px;
+        border:1px solid rgba(94,234,212,.12); border-radius:50%; right:14%; top:-235px;
+        box-shadow:0 0 0 44px rgba(94,234,212,.025),0 0 0 90px rgba(94,234,212,.018);
+        pointer-events:none; }
+    .ss-hero:before { content:''; position:absolute; width:180px; height:180px;
+        border-radius:50%; border:1px solid rgba(94,234,212,.1);
+        right:28%; bottom:-158px; pointer-events:none; }
+    .ss-hero-body,.ss-hero-window { position:relative; z-index:1; }
+    .ss-eyebrow { color:#5EEAD4; font-size:.72rem; letter-spacing:.14em;
+        font-weight:800; text-transform:uppercase; margin-bottom:.65rem; }
+    .ss-hero-title { font-size:clamp(2.1rem,3.2vw,3rem); font-weight:850;
+        letter-spacing:-.055em; color:#FFFFFF; line-height:1.08; margin:0 0 .6rem; }
+    .ss-hero-sub { font-size:.91rem; color:#D5E6EC; margin:0; }
+    .ss-hero-window { border:1px solid rgba(255,255,255,.17);
+        background:rgba(255,255,255,.09); backdrop-filter:blur(6px);
+        padding:1rem 1.12rem; border-radius:11px; min-width:240px; }
+    .ss-window-label { color:#9FF3E6; font-size:.63rem; letter-spacing:.09em; font-weight:800; }
+    .ss-window-value { color:#FFFFFF; font-size:.92rem; font-weight:750; margin-top:.35rem; }
+    [data-testid="stMetric"] { background:#FFFFFF; border:1px solid var(--line);
+        border-radius:12px; padding:15px 20px; border-top:3px solid #0D9488;
+        box-shadow:0 4px 20px rgba(15,23,42,.03); }
+    [data-testid="stMetricLabel"] { color:#475569; font-size:.8rem; }
+    [data-testid="stMetricValue"] { color:var(--navy); font-weight:750; }
+    /* Native navigation is interactive; tabs are never replaced by inert HTML. */
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        background:var(--navy2); padding:8px 9px; border-radius:12px;
+        border:1px solid #203B59; gap:4px; margin-top:.6rem;
+        box-shadow:0 7px 15px rgba(15,23,42,.09); }
+    div[data-testid="stTabs"] button[data-baseweb="tab"] {
+        color:#D8E6F0; background:transparent; border-radius:8px;
+        font-size:.85rem; padding:.65rem .83rem; font-weight:600; }
+    div[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
+        background:rgba(255,255,255,.10); color:#FFFFFF; }
+    div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+        background:#0F766E; color:#FFFFFF; font-weight:760; }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] { background:#5EEAD4; }
+    /* Nested tabs (Density Contour) remain light, separate from top navigation. */
+    div[data-testid="stTabs"] div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        background:#F1F5F9; border:1px solid #DCE5EC; box-shadow:none; }
+    div[data-testid="stTabs"] div[data-testid="stTabs"] button[data-baseweb="tab"] {
+        color:#334155; background:transparent; }
+    div[data-testid="stTabs"] div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+        color:#0F766E; background:#E4F5F1; }
+    .ss-section-heading { margin:1.35rem 0 .7rem; }
+    .ss-section-eyebrow { text-transform:uppercase; letter-spacing:.15em;
+        color:#0F766E; font-size:.68rem; font-weight:850; }
+    .ss-section-title { color:var(--navy); font-size:1.42rem;
+        font-weight:820; letter-spacing:-.035em; margin:.27rem 0 .25rem; }
+    .ss-section-desc { color:#526477; font-size:.88rem; margin:0; }
+    .ss-card { background:#FFFFFF; border:1px solid var(--line);
+        border-radius:12px; padding:18px 19px 18px; min-height:144px;
+        border-top:3px solid #0F766E; box-shadow:0 4px 12px rgba(15,23,42,.025); }
+    .ss-research-card { min-height: 194px; }
+    .ss-card-accent { color:#0F766E; letter-spacing:.1em; text-transform:uppercase;
+        font-size:.66rem; font-weight:850; }
+    .ss-card-title { margin:.6rem 0 .35rem; color:var(--navy);
+        font-size:1.02rem; font-weight:780; }
+    .ss-card-text { color:#526477; font-size:.83rem; line-height:1.55; margin:0; }
+    .ss-event-strip { background:#FFFFFF; border:1px solid var(--line);
+        border-left:4px solid #F59E0B; border-radius:11px; padding:14px 16px;
+        margin:.4rem 0; }
+    .ss-event-title { color:#0F172A; font-weight:770; font-size:.93rem; }
+    .ss-event-desc { color:#64748B; font-size:.79rem; margin-top:.3rem; }
+    .ss-method-note { background:#EFF7F6; border:1px solid #D5E9E6;
+        border-radius:11px; padding:14px 18px; color:#334155;
+        font-size:.85rem; line-height:1.6; margin:.6rem 0 1rem; }
+    .science-box { background:#FFFFFF; border:1px solid var(--line);
+        border-left:3px solid #0F766E; border-radius:11px; padding:16px;
+        color:#334155; line-height:1.55; font-size:.9rem; }
+    .science-box strong { color:#0F172A; }
+    .ss-focus-row { display:flex; justify-content:space-between; align-items:center;
+        gap:1rem; border-bottom:1px solid #DCE5EC; padding:.35rem 0 .85rem; }
+    .ss-focus-left { color:#0F172A; font-weight:770; font-size:1.02rem; }
+    .ss-focus-right { color:#64748B; font-size:.77rem; }
+    .ss-mini-band { background:linear-gradient(90deg,#E9F8F4,#F7FAFC);
+        padding:12px 15px; border-radius:10px; border-left:3px solid #0F766E;
+        color:#334155; font-size:.84rem; }
+    @media (max-width: 1080px) {
+        .ss-hero { padding:23px; flex-direction:column; align-items:flex-start; gap:1rem; }
+        .ss-hero-window { min-width:0; width:100%; }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] { overflow-x:auto; flex-wrap:nowrap; }
+        div[data-testid="stTabs"] button[data-baseweb="tab"] { white-space:nowrap; }
+    }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-def show_scientific_card(main_text: str, note_text: str):
+@st.cache_data(show_spinner="Reading the reviewed earthquake catalog...")
+def load_catalog() -> pd.DataFrame:
+    """Load the reviewed catalog only. Fail rather than manufacture fallback data."""
+    if not DATA_PATH.is_file():
+        raise FileNotFoundError(f"Required earthquake dataset not found: {DATA_PATH}")
+
+    data = pd.read_csv(DATA_PATH, parse_dates=["event_date_utc"], low_memory=False)
+    required = {
+        "id", "time", "event_date_utc", "latitude", "longitude", "mag",
+        "depth", "magType", "magError", "latitude_hemisphere",
+        "depth_exactly_10km", "magnitude_band", "depth_category", "place",
+    }
+    absent = sorted(required - set(data.columns))
+    if absent:
+        raise ValueError(f"The dataset is missing required columns: {absent}")
+    if not 2000 <= len(data) <= 10000 or data.shape[1] < 7:
+        raise ValueError(f"Unexpected catalog dimensions: {data.shape}")
+    if data["id"].isna().any() or not data["id"].is_unique:
+        raise ValueError("Earthquake event IDs must be unique and non-null.")
+    if data["event_date_utc"].isna().any():
+        raise ValueError("Invalid UTC dates found in the dataset.")
+    return data
+
+
+def filter_catalog(
+    original: pd.DataFrame,
+    mag_range: tuple[float, float],
+    date_range: tuple[date, date] | list[date] | None,
+    include_ten: bool,
+    hemispheres: list[str],
+) -> pd.DataFrame:
+    """Apply exactly the same common filters to all nine primary charts."""
+    result = original.loc[original["mag"].between(*mag_range)].copy()
+    if not isinstance(date_range, (tuple, list)) or len(date_range) != 2:
+        return result.iloc[0:0].copy()  # Incomplete date choice is not full data.
+    first, last = date_range
+    if first > last:
+        return result.iloc[0:0].copy()
+    result = result.loc[result["event_date_utc"].dt.date.between(first, last)].copy()
+    result = result.loc[result["latitude_hemisphere"].isin(hemispheres)].copy()
+    if not include_ten:
+        assigned = result["depth_exactly_10km"].astype(str).str.lower().eq("true")
+        result = result.loc[~assigned].copy()
+    return result
+
+
+def explain(reading: str, caution: str) -> None:
     st.markdown(
-        f"""
-        <div class="sci-card">
-            <h4 style="margin-top:0; color:{accent_col};">📖 Nasıl Okunmalı? (How to read)</h4>
-            <div style="font-size:0.94rem; line-height:1.5;">{main_text}</div>
-            <div class="sci-note">
-                <b>🔬 Bilimsel Not (Scientific Note):</b><br>{note_text}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
+        f'<div class="science-box"><strong>How to read</strong><p>{reading}</p>'
+        f'<strong>Scientific note</strong><p>{caution}</p></div>',
+        unsafe_allow_html=True,
     )
 
-def render_interactive_map(df_plot, lat_col, lon_col, color_col, size_col=None, hover_name=None, hover_data=None, zoom=1.3, center=None, height=550, color_scale=color_scale_main, discrete_seq=None, labels=None, title=None, animation_frame=None):
-    use_new_api = hasattr(px, "scatter_map")
-    plot_fn = px.scatter_map if use_new_api else px.scatter_mapbox
-    
-    fig = plot_fn(
-        df_plot, lat=lat_col, lon=lon_col, color=color_col, size=size_col,
-        size_max=18 if size_col else None,
-        color_continuous_scale=color_scale if not discrete_seq else None,
-        color_discrete_sequence=discrete_seq,
-        hover_name=hover_name, hover_data=hover_data,
-        zoom=zoom, center=center, height=height, labels=labels, title=title,
-        animation_frame=animation_frame
-    )
-    
-    layout_args = dict(
-        margin={"r": 10, "t": 45 if title else 10, "l": 10, "b": 10},
-        paper_bgcolor=bg_card,
-        plot_bgcolor=bg_card,
-        font=dict(color=text_primary)
-    )
-    if use_new_api:
-        layout_args["map_style"] = map_tile
+
+def plot_with_note(fig: go.Figure, key: str, reading: str, caution: str) -> None:
+    left, right = st.columns([3.5, 1.2], gap="large")
+    with left:
+        with st.container(border=True):
+            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font=dict(color=SLATE))
+            st.plotly_chart(fig, width="stretch",
+                            config={"displaylogo": False}, key=key)
+    with right:
+        explain(reading, caution)
+
+
+def choose_chart(title: str, options: list[str], *, key: str) -> str:
+    if hasattr(st, "segmented_control"):
+        value = st.segmented_control(title, options=options, default=options[0], key=key)
     else:
-        layout_args["mapbox_style"] = map_tile
-        
-    fig.update_layout(**layout_args)
-    fig.update_traces(marker=dict(opacity=0.82))
-    return fig
+        value = st.radio(title, options, horizontal=True, key=key)
+    return value or options[0]
 
-# =========================================================================
-# ÜYE 2 GRAFİK ÜRETİCİ FONKSİYONLARI
-# =========================================================================
-def build_u2_density_contour(data: pd.DataFrame, view_mode: str, is_binned: bool):
-    d_plot = data.copy()
-    if view_mode == "Focused View":
-        d_plot = d_plot[(d_plot["mag"] <= 6.8) & (d_plot["depth"] <= 250)]
-    
-    if is_binned:
-        nbinsx = max(10, int((d_plot["mag"].max() - d_plot["mag"].min()) / 0.05)) if not d_plot.empty else 30
-        nbinsy = max(10, int((d_plot["depth"].max() - d_plot["depth"].min()) / 10.0)) if not d_plot.empty else 30
-        title_txt = f"Detaylı Histogram Yoğunluk Konturu (0.05 Mw × 10 km Bin) — {view_mode}"
-    else:
-        nbinsx, nbinsy = 28, 28
-        title_txt = f"Genel Büyüklük × Derinlik Yoğunluk Konturu (Overview) — {view_mode}"
 
-    fig = px.density_contour(
-        d_plot, x="mag", y="depth", nbinsx=nbinsx, nbinsy=nbinsy,
-        title=title_txt,
-        labels={"mag": "Deprem Büyüklüğü (Mw)", "depth": "Derinlik (km)"}
-    )
-    fig.update_traces(contours_coloring="fill", contours_showlabels=True, colorscale="Tealgrn")
-    fig.update_yaxes(autorange="reversed", title="Derinlik (km) [Yüzey Üstte]")
-    fig.update_layout(height=470, paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary))
-    return fig
-
-def build_u2_violin_plot(data: pd.DataFrame, selected_methods: list):
-    v_df = data[data["magType"].isin(selected_methods)].copy()
-    v_df["magError"] = pd.to_numeric(v_df["magError"], errors="coerce")
-    v_df = v_df.dropna(subset=["magError"])
-    v_df = v_df[v_df["magError"] >= 0]
-
-    fig = px.violin(
-        v_df, x="magType", y="magError", color="magType",
-        box=True, points="outliers",
-        category_orders={"magType": selected_methods},
-        title="Tahmin Yöntemlerine (magType) Göre Büyüklük Belirsizliği (magError) Dağılımı",
-        labels={"magType": "Büyüklük Tahmin Yöntemi (magType)", "magError": "Büyüklük Hatası / Belirsizliği (magError)"},
-        color_discrete_sequence=px.colors.qualitative.Safe
-    )
-    fig.update_layout(height=460, showlegend=False, paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary))
-    return fig
-
-def build_u2_calendar_heatmap(data: pd.DataFrame, year: int, visible_start, visible_end):
-    start_yr = pd.Timestamp(year=year, month=1, day=1)
-    end_yr = pd.Timestamp(year=year, month=12, day=31)
-    all_days = pd.date_range(start_yr, end_yr, freq="D")
-
-    yr_df = data[data["event_date_utc"].dt.year == year]
-    daily_counts = yr_df.groupby(yr_df["event_date_utc"].dt.normalize()).size()
-
-    cal_df = pd.DataFrame({"date": all_days})
-    cal_df["count"] = cal_df["date"].map(daily_counts).fillna(0).astype(int)
-    cal_df["in_range"] = (cal_df["date"].dt.date >= visible_start) & (cal_df["date"].dt.date <= visible_end)
-    cal_df["z_val"] = np.where(cal_df["in_range"], np.log1p(cal_df["count"]), np.nan)
-    cal_df["weekday"] = cal_df["date"].dt.weekday
-    
-    first_monday = start_yr - pd.Timedelta(days=start_yr.weekday())
-    cal_df["week_idx"] = ((cal_df["date"] - first_monday).dt.days // 7)
-
-    day_names = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
-    max_week = int(cal_df["week_idx"].max()) + 1
-
-    z_matrix = np.full((7, max_week), np.nan)
-    text_matrix = np.full((7, max_week), "", dtype=object)
-
-    for _, row in cal_df.iterrows():
-        w = int(row["week_idx"])
-        d = int(row["weekday"])
-        z_matrix[d, w] = row["z_val"]
-        d_str = row["date"].strftime("%d %b %Y")
-        if row["in_range"]:
-            text_matrix[d, w] = f"<b>{d_str} (UTC)</b><br>Deprem Sayısı: {row['count']:,}"
-        else:
-            text_matrix[d, w] = f"<b>{d_str}</b><br>Veri/Filtre Aralığı Dışında"
-
-    month_ticks, month_labels = [], []
-    for m in range(1, 13):
-        m_date = pd.Timestamp(year=year, month=m, day=1)
-        w_m = int((m_date - first_monday).days // 7)
-        month_ticks.append(w_m)
-        month_labels.append(m_date.strftime("%b"))
-
-    fig = go.Figure(data=go.Heatmap(
-        z=z_matrix,
-        x=list(range(max_week)),
-        y=day_names,
-        text=text_matrix,
-        hoverinfo="text",
-        colorscale="Teal",
-        showscale=True,
-        xgap=3,
-        ygap=3,
-        colorbar=dict(
-            title="Günlük Olay<br>(Log Ölçek)",
-            tickvals=[0, np.log1p(5), np.log1p(15), np.log1p(50), np.log1p(150)],
-            ticktext=["0", "5", "15", "50", "150+"]
-        )
-    ))
-
-    if year == 2023:
-        feb6 = pd.Timestamp("2023-02-06")
-        w_f6 = int((feb6 - first_monday).days // 7)
-        d_f6 = feb6.weekday()
-        fig.add_shape(
-            type="rect",
-            x0=w_f6 - 0.5, x1=w_f6 + 0.5,
-            y0=d_f6 - 0.5, y1=d_f6 + 0.5,
-            line=dict(color="#f59e0b", width=3.2),
-        )
-        fig.add_annotation(
-            x=w_f6, y=d_f6, text="★ 6 Şub",
-            showarrow=True, arrowhead=2, ax=0, ay=-28,
-            font=dict(color="#d97706", size=11, family="Arial Black"),
-            bgcolor=bg_card, bordercolor="#f59e0b"
-        )
-
-    fig.update_xaxes(tickmode="array", tickvals=month_ticks, ticktext=month_labels, showgrid=False)
-    fig.update_yaxes(autorange="reversed", showgrid=False)
-    fig.update_layout(
-        title=f"{year} Yılı Günlük M4.5+ Deprem Aktivite Takvimi (UTC)",
-        height=340,
-        margin=dict(l=20, r=20, t=45, b=20),
-        paper_bgcolor=bg_card,
-        plot_bgcolor="#e2e8f0" if is_light else "#334155",
-        font=dict(color=text_primary)
-    )
-    return fig
-
-# --- SIDEBAR FİLTRELERİ ---
-if not is_mock:
-    st.sidebar.success(f"🟢 Veri Aktif: {len(df):,} olay × {len(df.columns)} sütun")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎛️ Dinamik Filtreler")
-
-preset = st.sidebar.selectbox(
-    "⚡ Hızlı Sunum Senaryoları:",
-    ["Tüm Küresel Kayıtlar (Varsayılan)", "Sadece Büyük Depremler (M ≥ 6.0)", "Sadece Sığ Depremler (< 70 km)", "Şubat 2023 Dönemi (Türkiye Odaklı)"]
-)
-
-valid_dates = df['date_only'].dropna()
-min_date, max_date = valid_dates.min(), valid_dates.max()
-min_mag, max_mag = float(df['mag'].min()), float(df['mag'].max())
-min_depth, max_depth = float(df['depth'].min()), float(df['depth'].max())
-
-default_dates = (min_date, max_date)
-default_mag = (min_mag, max_mag)
-default_depth = (min_depth, max_depth)
-
-if preset == "Sadece Büyük Depremler (M ≥ 6.0)":
-    default_mag = (6.0, max_mag)
-elif preset == "Sadece Sığ Depremler (< 70 km)":
-    default_depth = (min_depth, 70.0)
-elif preset == "Şubat 2023 Dönemi (Türkiye Odaklı)":
-    default_dates = (pd.to_datetime("2023-02-01").date(), pd.to_datetime("2023-02-28").date())
-
-date_range = st.sidebar.date_input("📅 Tarih Aralığı (UTC)", value=default_dates, min_value=min_date, max_value=max_date)
-mag_range = st.sidebar.slider("📈 Deprem Büyüklüğü (Mw)", min_mag, max_mag, default_mag, step=0.1)
-depth_range = st.sidebar.slider("⬇️ Derinlik Aralığı (km)", min_depth, max_depth, default_depth, step=1.0)
-
-hemispheres = st.sidebar.multiselect(
-    "🌐 Yarımküre Seçimi",
-    options=sorted(df['hemisphere_col'].dropna().unique()),
-    default=sorted(df['hemisphere_col'].dropna().unique())
-)
-
-include_10km = st.sidebar.checkbox(
-    "Tam 10 km kaydedilen derinlikleri dahil et (depth_exactly_10km)",
-    value=True,
-    help="USGS kayıtlarında derinliği tam hesaplanamayan sığ depremlere varsayılan olarak 10 km atanabilir."
-)
-
-if len(date_range) == 2:
-    start_date, end_date = date_range
-    filtered_df = df[
-        (df['date_only'] >= start_date) & (df['date_only'] <= end_date) &
-        (df['mag'] >= mag_range[0]) & (df['mag'] <= mag_range[1]) &
-        (df['depth'] >= depth_range[0]) & (df['depth'] <= depth_range[1]) &
-        (df['hemisphere_col'].isin(hemispheres))
-    ].copy()
-else:
-    filtered_df = df.copy()
-
-if not include_10km:
-    ten_km_mask = filtered_df["depth_exactly_10km"].astype(str).str.lower().eq("true")
-    filtered_df = filtered_df.loc[~ten_km_mask].copy()
-
-st.sidebar.markdown("---")
-st.sidebar.download_button(
-    label="📥 Filtrelenen Veriyi İndir (CSV)",
-    data=filtered_df.to_csv(index=False).encode('utf-8'),
-    file_name="seismoscope_filtered_export.csv",
-    mime="text/csv",
-    use_container_width=True
-)
-
-# --- 4. ANA EKRAN HERO BANNER & KPI KARTLARI ---
-st.markdown(f"""
-    <div class='hero-banner'>
-        <h1 style='margin:0; font-size:2.1rem; color:{text_primary};'>🌍 SEISMOSCOPE — Küresel Deprem Analiz Platformu</h1>
-        <p style='margin:6px 0 0 0; color:{text_secondary}; font-size:1.02rem;'>
-            <b>USGS M4.5+ Küresel Sismik Veri Seti (1 Şubat 2023 – 31 Mayıs 2024)</b> &nbsp;|&nbsp; 9 Özgün Görselleştirme, Makine Öğrenmesi ve 6 Şubat Karar Destek Sistemi
-        </p>
-    </div>
-""", unsafe_allow_html=True)
-
-total_pct = (len(filtered_df) / len(df)) * 100 if len(df) > 0 else 0
-shallow_pct = (len(filtered_df[filtered_df['depth'] < 70]) / len(filtered_df) * 100) if not filtered_df.empty else 0
-
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Seçili Deprem Kaydı", f"{len(filtered_df):,}", f"Küresel verinin %{total_pct:.1f}'i")
-kpi2.metric("Maksimum Büyüklük", f"{filtered_df['mag'].max():.1f} Mw" if not filtered_df.empty else "0 Mw", "Pazarcık / Kahramanmaraş" if not filtered_df.empty and filtered_df['mag'].max() >= 7.8 else "Seçili Aralık Zirvesi")
-kpi3.metric("Ortalama / Medyan Derinlik", f"{filtered_df['depth'].mean():.1f} km" if not filtered_df.empty else "0 km", f"Medyan: {filtered_df['depth'].median():.1f} km | %{shallow_pct:.1f} Sığ")
-kpi4.metric("Güçlü Sarsıntılar (M ≥ 6.0)", f"{len(filtered_df[filtered_df['mag'] >= 6.0]):,}" if not filtered_df.empty else "0", f"{len(filtered_df[filtered_df['mag'] >= 7.0])} Major (≥7.0 Mw)")
-
-if not filtered_df.empty:
-    top_event = filtered_df.loc[filtered_df['mag'].idxmax()]
-    top_place = top_event['place'] if 'place' in filtered_df.columns else "Bilinmiyor"
-    dom_hem = filtered_df['hemisphere_col'].mode()[0]
+def show_overview(filtered: pd.DataFrame, all_data: pd.DataFrame) -> None:
+    """New landing page. All charts here summarize the reviewed CSV, never fake data."""
     st.markdown(
-        f"<div class='insight-box'>💡 <b>Canlı Veri Özeti:</b> Seçili filtrelerdeki en şiddetli sarsıntı <b>{top_event['mag']:.1f} Mw</b> büyüklüğüyle <b>{top_place}</b> bölgesinde kaydedilmiştir. Kayıtların <b>%{shallow_pct:.1f}</b>'i yüzeye yakın sığ depremlerden (<70 km) oluşurken en yoğun sismik hareketlilik <b>{dom_hem}</b> yarımkürededir.</div>",
-        unsafe_allow_html=True
+        '<div class="ss-section-heading">'
+        '<div class="ss-section-eyebrow">01 / Mission control</div>'
+        '<div class="ss-section-title">A clearer view of seismic activity</div>'
+        '<p class="ss-section-desc">Explore a historical M4.5+ earthquake catalog, '
+        'inspect nine visualizations, and review trained exploratory models.</p>'
+        '</div>', unsafe_allow_html=True,
     )
 
-# --- 5. NAVİGASYON (SEKMELER - 9 GÖRSELLEŞTİRME + ML + 6 ŞUBAT) ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🗺️ Coğrafi & Kategorik (Üye 1)", 
-    "📈 İstatistiksel & Zamansal (Üye 2)", 
-    "🧊 Çok Boyutlu & 3B Analiz (Üye 3)",
-    "🤖 Makine Öğrenmesi (K-Means & DT)", 
-    "🇹🇷 6 Şubat Türkiye & Dalga Simülatörü"
-])
-
-# ==========================================
-# SEKME 1: ÜYE 1 GRAFİKLERİ (MAP, SANKEY, SUNBURST)
-# ==========================================
-with tab1:
-    if filtered_df.empty:
-        st.warning("⚠️ Seçilen filtre kriterlerine uygun deprem kaydı bulunamadı.")
-    else:
-        col_title, col_mode = st.columns([2, 2])
-        with col_title:
-            st.subheader("1. Küresel Deprem Dağılım Haritası (Geographic Map)")
-        with col_mode:
-            map_mode = st.radio(
-                "Harita Görünüm Modu:",
-                ["🗺️ 2B İnteraktif Harita (Zoom)", "🌐 3B İnteraktif Küre", "🎬 Zaman Animasyonu (Aylık Akış)"],
-                horizontal=True
-            )
-        
-        plot_df = filtered_df.copy()
-        plot_df['size_mag'] = ((plot_df['mag'] - 4.2).clip(lower=0.25) ** 2.15).round(2)
-        
-        hover_cols = {
-            'mag': ':.1f', 'depth': ':.1f', 'date_only': True,
-            'latitude': ':.2f', 'longitude': ':.2f',
-            'mag_cat_col': True, 'depth_cat_col': True, 'size_mag': False
-        }
-        hover_title = 'place' if 'place' in plot_df.columns else None
-        label_map = {"mag": "Büyüklük (Mw)", "depth": "Derinlik (km)", "date_only": "Tarih", "mag_cat_col": "Büyüklük Bandı", "depth_cat_col": "Derinlik Kat.", "year_month": "Dönem"}
-
-        if map_mode == "🗺️ 2B İnteraktif Harita (Zoom)":
-            fig_map = render_interactive_map(
-                plot_df, lat_col="latitude", lon_col="longitude", color_col="mag", size_col="size_mag",
-                hover_name=hover_title, hover_data=hover_cols, zoom=1.35, height=550, color_scale=color_scale_main, labels=label_map
-            )
-        elif map_mode == "🌐 3B İnteraktif Küre":
-            fig_map = px.scatter_geo(
-                plot_df, lat="latitude", lon="longitude", color="mag", size="size_mag",
-                size_max=18, opacity=0.85, projection="orthographic", color_continuous_scale=color_scale_main,
-                hover_name=hover_title, hover_data=hover_cols, height=550, labels=label_map
-            )
-            fig_map.update_geos(
-                bgcolor=bg_card, showland=True, landcolor=globe_land,
-                showocean=True, oceancolor=globe_ocean,
-                showcountries=True, countrycolor=globe_border,
-                showcoastlines=True, coastlinecolor=globe_border
-            )
-            fig_map.update_layout(margin={"r":10,"t":10,"l":10,"b":10}, paper_bgcolor=bg_card, font=dict(color=text_primary))
+    a, b = st.columns([1.75, 1], gap="large")
+    with a:
+        st.markdown("#### Monthly recorded earthquake activity")
+        if filtered.empty:
+            st.info("No earthquake records match the active filters. Change the filters to view monthly activity.")
         else:
-            anim_df = plot_df.sort_values('year_month')
-            fig_map = render_interactive_map(
-                anim_df, lat_col="latitude", lon_col="longitude", color_col="mag", size_col="size_mag",
-                hover_name=hover_title, hover_data=hover_cols, zoom=1.3, height=590, color_scale=color_scale_main,
-                labels=label_map, animation_frame="year_month"
+            monthly = (filtered.groupby(filtered["event_date_utc"].dt.to_period("M"))
+                       .size().rename("Records").reset_index())
+            monthly["Month"] = monthly["event_date_utc"].dt.to_timestamp()
+            fig = go.Figure(go.Scatter(
+                x=monthly["Month"], y=monthly["Records"],
+                mode="lines+markers", name="Recorded earthquakes",
+                line=dict(color="#0F766E", width=3, shape="spline"),
+                marker=dict(size=8, color="#0F766E", line=dict(color="#FFFFFF", width=1.5)),
+                fill="tozeroy", fillcolor="rgba(15,118,110,0.09)",
+                hovertemplate="%{x|%b %Y}<br><b>%{y:,} earthquakes</b><extra></extra>",
+            ))
+            fig.update_layout(
+                height=340, margin=dict(l=8, r=14, t=10, b=32),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#475569"), showlegend=False,
+                xaxis=dict(title=None, tickformat="%b %Y", showgrid=False),
+                yaxis=dict(title="Recorded M4.5+ events", gridcolor="#E7EDF3", rangemode="tozero"),
             )
+            with st.container(border=True):
+                st.plotly_chart(fig, width="stretch", key="overview_monthly_activity",
+                                config={"displaylogo": False})
+            st.caption("Counts summarize recorded catalog events within the active dashboard filters; "
+                       "they are not an estimate of all earthquake occurrence.")
+    with b:
+        st.markdown("#### Catalog at a glance")
+        first = all_data["event_date_utc"].min().date()
+        last = all_data["event_date_utc"].max().date()
+        st.markdown(
+            '<div class="ss-card">'
+            '<div class="ss-card-accent">Source & coverage</div>'
+            '<div class="ss-card-title">USGS ANSS ComCat</div>'
+            f'<p class="ss-card-text">{first:%d %b %Y} – {last:%d %b %Y} (UTC)<br>'
+            f'{len(all_data):,} catalogued M4.5+ records.<br>'
+            'Geography: global. Measurements: catalog-reported.</p>'
+            '</div>', unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="ss-method-note"><strong>About the filters:</strong> '
+            'The charts and the monthly activity summary use the sidebar selection. '
+            'The dedicated 6 February page has a separate regional date range to preserve its context.</div>', unsafe_allow_html=True,
+        )
 
-        st.plotly_chart(fig_map, use_container_width=True)
-
-        col_sankey, col_sunburst = st.columns(2)
-
-        with col_sankey:
-            st.subheader("2. Kategorisel Akış (Sankey Diagram)")
-            st.caption("Akış Yönü: Magnitude Band ➔ Depth Category ➔ Hemisphere")
-            
-            s1 = filtered_df.groupby(['mag_cat_col', 'depth_cat_col']).size().reset_index(name='count')
-            s1.columns = ['source', 'target', 'value']
-            s2 = filtered_df.groupby(['depth_cat_col', 'hemisphere_col']).size().reset_index(name='count')
-            s2.columns = ['source', 'target', 'value']
-            links = pd.concat([s1, s2], axis=0)
-            links = links[links['value'] > 0]
-
-            unique_nodes = list(pd.unique(links[['source', 'target']].values.ravel('K')))
-            node_map = {node: idx for idx, node in enumerate(unique_nodes)}
-
-            palette = {
-                '4.5': ('#0ea5e9', 'rgba(14, 165, 233, 0.35)'),
-                'Light': ('#0ea5e9', 'rgba(14, 165, 233, 0.35)'),
-                '5.0': ('#eab308', 'rgba(234, 179, 8, 0.42)'),
-                'Moderate': ('#eab308', 'rgba(234, 179, 8, 0.42)'),
-                '6.0': ('#f97316', 'rgba(249, 115, 22, 0.50)'),
-                'Strong': ('#f97316', 'rgba(249, 115, 22, 0.50)'),
-                '7.0': ('#e11d48', 'rgba(225, 29, 72, 0.65)'),
-                'Major': ('#e11d48', 'rgba(225, 29, 72, 0.65)'),
-                'Shallow': ('#10b981', 'rgba(16, 185, 129, 0.35)'),
-                'Intermediate': ('#8b5cf6', 'rgba(139, 92, 246, 0.35)'),
-                'Deep': ('#6366f1', 'rgba(99, 102, 241, 0.42)'),
-                'Northern': ('#14b8a6', 'rgba(20, 184, 166, 0.35)'),
-                'Southern': ('#ec4899', 'rgba(236, 72, 153, 0.35)')
-            }
-
-            def get_node_color(label):
-                for k, v in palette.items():
-                    if k.lower() in str(label).lower():
-                        return v[0]
-                return "#0284c7"
-
-            def get_link_color(src_label):
-                for k, v in palette.items():
-                    if k.lower() in str(src_label).lower():
-                        return v[1]
-                return "rgba(2, 132, 199, 0.32)"
-
-            fig_sankey = go.Figure(data=[go.Sankey(
-                textfont=dict(color=text_primary, size=12, family="Arial"),
-                node=dict(
-                    pad=20, thickness=22,
-                    line=dict(color=bg_card, width=1.5),
-                    label=unique_nodes,
-                    color=[get_node_color(n) for n in unique_nodes],
-                    hovertemplate="<b>%{label}</b><br>Toplam Akış: %{value:,} deprem<extra></extra>"
-                ),
-                link=dict(
-                    source=links['source'].map(node_map),
-                    target=links['target'].map(node_map),
-                    value=links['value'],
-                    color=[get_link_color(s) for s in links['source']],
-                    hovertemplate="<b>%{source.label} ➔ %{target.label}</b><br>Deprem Sayısı: %{value:,}<extra></extra>"
-                )
-            )])
-            fig_sankey.update_layout(height=490, margin=dict(l=15, r=15, t=20, b=15), paper_bgcolor=bg_card, font=dict(color=text_primary, size=12))
-            st.plotly_chart(fig_sankey, use_container_width=True)
-
-        with col_sunburst:
-            st.subheader("3. Hiyerarşik Dağılım (Sunburst Diagram)")
-            st.caption("Hiyerarşi: Hemisphere (İç) ➔ Magnitude Band (Orta) ➔ Depth Category (Dış)")
-            
-            fig_sunburst = px.sunburst(
-                filtered_df,
-                path=['hemisphere_col', 'mag_cat_col', 'depth_cat_col'],
-                color='mag',
-                color_continuous_scale=color_scale_main,
-                height=490,
-                labels={'mag': 'Ort. Büyüklük (Mw)'}
-            )
-            fig_sunburst.update_traces(
-                hovertemplate="<b>%{label}</b><br>Kayıt Sayısı: %{value:,} deprem<br>Ortalama Büyüklük: %{color:.2f} Mw<br>Üst Kategori Oranı: %{percentParent:.1%}<extra></extra>",
-                insidetextorientation='radial'
-            )
-            fig_sunburst.update_layout(margin=dict(l=10, r=10, t=20, b=10), paper_bgcolor=bg_card, font=dict(color=text_primary))
-            st.plotly_chart(fig_sunburst, use_container_width=True)
-
-# =========================================================================
-# SEKME 2: ÜYE 2 — İSTATİSTİKSEL VE ZAMANSAL ANALİZ
-# =========================================================================
-with tab2:
-    st.subheader("📈 İstatistiksel ve Zamansal Analiz (Üye 2 — Statistical & Temporal Lead)")
-    st.caption("Büyüklük × Derinlik yoğunluk konturları, ölçüm yöntemi belirsizlik dağılımı (Violin Plot) ve günlük sismik aktivite takvimi (Calendar Heatmap).")
-
-    if filtered_df.empty:
-        st.warning("⚠️ Seçilen filtre kriterlerine uygun deprem kaydı bulunamadı.")
+    st.markdown(
+        '<div class="ss-section-heading">'
+        '<div class="ss-section-eyebrow">02 / Geographic footprint</div>'
+        '<div class="ss-section-title">Recorded epicenters across the globe</div>'
+        '<p class="ss-section-desc">An at-a-glance location summary of your filtered catalog. '
+        'For the full interactive map, visit Geographic &amp; Categorical.</p>'
+        '</div>', unsafe_allow_html=True,
+    )
+    if filtered.empty:
+        st.info("No mapped events match the active filters.")
     else:
-        u2_choices = [
-            "4. Density Contour (Büyüklük × Derinlik Yoğunluğu)",
-            "5. Violin Plot (Yöntemlere Göre Ölçüm Belirsizliği)",
-            "6. Calendar Heatmap (Günlük Deprem Aktivite Takvimi)"
-        ]
-        chosen_u2 = st.radio("İncelenecek Görselleştirmeyi Seçin (Üye 2):", u2_choices, horizontal=True)
-        st.markdown("---")
+        locations = filtered.dropna(subset=["latitude", "longitude", "mag"])
+        if locations.empty:
+            st.info("The filtered records have no valid geographic coordinates.")
+        else:
+            # Secondary overview map, not a replacement for Member 1's graded map.
+            geo_fig = go.Figure(go.Scattergeo(
+                lat=locations["latitude"], lon=locations["longitude"],
+                mode="markers",
+                customdata=locations[["id", "depth"]].to_numpy(),
+                marker=dict(size=3.6, opacity=.62, color=locations["mag"],
+                            colorscale=[[0,"#0F766E"],[.6,"#6366F1"],[1,"#F59E0B"]],
+                            cmin=4.5, cmax=max(7.8,float(locations["mag"].max())),
+                            colorbar=dict(title="Magnitude", thickness=12, len=.7)),
+                hovertemplate="Event: %{customdata[0]}<br>Lat: %{lat:.2f}°<br>"
+                              "Lon: %{lon:.2f}°<br>Depth: %{customdata[1]:.1f} km<extra></extra>",
+            ))
+            geo_fig.update_geos(
+                projection_type="natural earth", showland=True, landcolor="#EAF0F5",
+                showocean=True, oceancolor="#F8FBFD", showcoastlines=True,
+                coastlinecolor="#B9C7D6", showcountries=True,
+                countrycolor="#D0D9E3", showframe=False, bgcolor="rgba(0,0,0,0)",
+            )
+            geo_fig.update_layout(
+                height=330, margin=dict(l=0,r=0,t=8,b=2),
+                paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#475569"),
+                showlegend=False,
+            )
+            with st.container(border=True):
+                st.plotly_chart(geo_fig, width="stretch",
+                                key="overview_global_snapshot", config={"displaylogo":False})
+            st.caption(f"{len(locations):,} catalogued events with valid coordinates in the active selection. "
+                       "Symbols are location markers, not shaking-area estimates.")
 
-        if chosen_u2.startswith("4."):
-            h_col, c_col = st.columns([3, 1])
-            with h_col:
-                st.markdown("#### Magnitude × Depth Density Contour")
-                st.caption("Farklı histogram kutu genişlikleri (bin widths) kullanarak aynı deprem verisinin iki tamamlayıcı görünümü.")
-            with c_col:
-                contour_view = st.selectbox("Görünüm Aralığı (Chart range):", ["Focused View", "Full Range"])
-
-            ov_tab, det_tab = st.tabs(["Overview Contours (Genel Kontur)", "Detailed Bins (0.05 Mw × 10 km)"])
-
-            with ov_tab:
-                ch_col, nt_col = st.columns([3.4, 1.3], gap="large")
-                with ch_col:
-                    fig_ov = build_u2_density_contour(filtered_df, contour_view, is_binned=False)
-                    st.plotly_chart(fig_ov, use_container_width=True, key="u2_dens_ov")
-                with nt_col:
-                    show_scientific_card(
-                        "Otomatik seçilen kutu aralıkları (bins), genel büyüklük-derinlik yoğunlaşma örüntüsünü gösterir. Bu bir KDE tahmini değil, histogram konturudur.",
-                        "Tam 10 km olarak kaydedilen bazı derinlikler varsayılan atanmış değerler olabilir. Yorumlamadan önce sol menüdeki 'Tam 10 km' onay kutusunu kapatıp açarak karşılaştırın."
-                    )
-
-            with det_tab:
-                ch_col2, nt_col2 = st.columns([3.4, 1.3], gap="large")
-                with ch_col2:
-                    fig_det = build_u2_density_contour(filtered_df, contour_view, is_binned=True)
-                    st.plotly_chart(fig_det, use_container_width=True, key="u2_dens_det")
-                with nt_col2:
-                    show_scientific_card(
-                        "Sabit ince aralıklar (0.05 büyüklük × 10 km derinlik) yerel yoğunlaşmaları ortaya çıkarır. Renk ölçeği sayıları genel görünümle doğrudan kıyaslanmamalıdır.",
-                        "Özellikle 10 km derinlik çizgisindeki yatay yoğunlaşma sismolojik kataloglama standartlarından kaynaklanır."
-                    )
-
-        elif chosen_u2.startswith("5."):
-            st.markdown("#### Magnitude Uncertainty by Estimation Method (Violin Plot)")
-            st.caption("Deprem büyüklüğü tahmin yöntemleri (`magType`) arasında raporlanan büyüklük belirsizliğini (`magError`) karşılaştırın.")
-
-            if "magError" not in filtered_df.columns or "magType" not in filtered_df.columns:
-                st.info("Veri setinde `magType` veya `magError` sütunu bulunamadı.")
-            else:
-                method_counts = filtered_df.dropna(subset=["magError"])["magType"].value_counts()
-                available_methods = method_counts[method_counts >= 30].index.tolist()
-
-                if not available_methods:
-                    available_methods = method_counts.index.tolist()
-
-                selected_methods = st.multiselect(
-                    "Büyüklük Tahmin Yöntemleri (En az 30 geçerli kayıt içerenler):",
-                    options=available_methods,
-                    default=available_methods
-                )
-
-                violin_data = filtered_df.loc[
-                    filtered_df["magType"].isin(selected_methods),
-                    ["magType", "magError"]
-                ].copy()
-                violin_data["magError"] = pd.to_numeric(violin_data["magError"], errors="coerce")
-                violin_data = violin_data.dropna(subset=["magError"])
-                violin_data = violin_data[violin_data["magError"] >= 0]
-
-                v1, v2, v3 = st.columns(3)
-                v1.metric("Geçerli Ölçüm Sayısı", f"{len(violin_data):,}")
-                v2.metric("Seçili Yöntem Sayısı", f"{len(selected_methods)}")
-                v3.metric("Medyan Belirsizlik (magError)", f"{violin_data['magError'].median():.3f}" if not violin_data.empty else "—")
-
-                ch_col, nt_col = st.columns([3.4, 1.3], gap="large")
-                with ch_col:
-                    if violin_data.empty:
-                        st.info("Seçilen kriterlere uygun geçerli ölçüm bulunamadı.")
-                    else:
-                        fig_vio = build_u2_violin_plot(filtered_df, selected_methods)
-                        st.plotly_chart(fig_vio, use_container_width=True, key="u2_violin")
-                with nt_col:
-                    show_scientific_card(
-                        "Her bir keman (violin) bir yöntemin belirsizlik dağılımını temsil eder. Geniş bölümler daha yüksek yoğunluğu, içteki kutu ise çeyreklikleri (IQR) ve medyanı gösterir.",
-                        "Farklı büyüklük yöntemleri farklı sismik koşullar altında kullanılır. Raporlanan hatanın küçük olması tek başına o yöntemin daha doğru olduğunu kanıtlamaz."
-                    )
-
-                if not violin_data.empty:
-                    st.markdown("##### 📋 İstatistiksel Özet Tablosu (Statistical Summary)")
-                    summary_df = (
-                        violin_data.groupby("magType")["magError"]
-                        .agg(Records="size", Median="median", Mean="mean", Std_Dev="std")
-                        .reindex(selected_methods)
-                        .round(3)
-                        .reset_index()
-                        .rename(columns={"magType": "Method (Yöntem)", "Std_Dev": "Std. dev."})
-                    )
-                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-        elif chosen_u2.startswith("6."):
-            st.markdown("#### Daily Earthquake Activity Calendar (Günlük Deprem Takvimi)")
-            st.caption("Günlük M4.5+ deprem sayılarını UTC tarihlerine göre inceleyin. 2023 görünümünde 6 Şubat kehribar (amber) çerçeve ile işaretlenmiştir.")
-
-            y_col, s_col = st.columns([1, 2])
-            with y_col:
-                avail_years = sorted(df["event_date_utc"].dt.year.dropna().unique().astype(int))
-                cal_year = st.selectbox("Takvim Yılı (Calendar year):", options=avail_years, index=0)
-            with s_col:
-                geo_scope = st.selectbox(
-                    "Coğrafi Kapsam (Geographic scope):",
-                    ["Global (Tüm Dünya)", "6 Feb epicentral region (35–40°N, 34–41°E)"],
-                    help="Yaklaşık 6 Şubat bölgesi dikdörtgen koordinat filtresi: 35–40°K, 34–41°D."
-                )
-
-            cal_data = filtered_df.copy()
-            if not geo_scope.startswith("Global"):
-                cal_data = cal_data.loc[
-                    cal_data["latitude"].between(35, 40) & cal_data["longitude"].between(34, 41)
-                ].copy()
-
-            vis_start, vis_end = (date_range if len(date_range) == 2 else (min_date, max_date))
-            year_data = cal_data[cal_data["event_date_utc"].dt.year == int(cal_year)]
-            daily_series = year_data.groupby(year_data["event_date_utc"].dt.normalize()).size()
-
-            max_day_cnt = int(daily_series.max()) if not daily_series.empty else 0
-            feb6_cnt = int(daily_series.get(pd.Timestamp("2023-02-06"), 0))
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric(f"{cal_year} Yılındaki Olay Sayısı", f"{len(year_data):,}")
-            c2.metric("Günlük Zirve Kayıt (Peak Daily)", f"{max_day_cnt:,}")
-            if int(cal_year) == 2023:
-                c3.metric("6 Şubat 2023 (UTC) Kayıt Sayısı", f"{feb6_cnt:,}")
-            else:
-                c3.metric("Deprem Kaydedilen Gün Sayısı", f"{len(daily_series):,}")
-
-            ch_col, nt_col = st.columns([3.4, 1.3], gap="large")
-            with ch_col:
-                fig_cal = build_u2_calendar_heatmap(cal_data, int(cal_year), vis_start, vis_end)
-                st.plotly_chart(fig_cal, use_container_width=True, key="u2_cal")
-            with nt_col:
-                show_scientific_card(
-                    "Her kutucuk bir UTC gününü temsil eder. Koyu turkuaz tonları daha fazla M4.5+ depremi gösterir. Kesin sayı için kutucukların üzerine gelebilirsiniz.",
-                    "2023 görünümünde kehribar çerçeve 6 Şubat'ı işaretler. Renkler log(1 + sayı) ölçeğini kullanır. Bölgesel seçenek yaklaşık koordinatları baz alır."
-                )
-
-            if not daily_series.empty:
-                st.markdown("##### 🏆 En Aktif 5 Gün (Most Active Days)")
-                top_days = (
-                    daily_series.sort_values(ascending=False)
-                    .head(5)
-                    .rename_axis("UTC Tarih")
-                    .reset_index(name="Kaydedilen Deprem Sayısı (M4.5+)")
-                )
-                top_days["UTC Tarih"] = top_days["UTC Tarih"].dt.strftime("%d %b %Y")
-                st.dataframe(top_days, use_container_width=True, hide_index=True)
-
-# =========================================================================
-# SEKME 3: ÜYE 3 — ÇOK BOYUTLU VE 3B ANALİZ (dataviz.txt ENTEGRASYONU)
-# =========================================================================
-with tab3:
-    st.subheader("🧊 Çok Boyutlu, Lokasyon ve 3B Analiz (Üye 3 — Multidimensional & 3D Lead)")
-    st.caption("Lokasyon bazlı Treemap dağılımı, 6 boyutlu ölçüm kalitesi Parallel Coordinates analizi ve 3 boyutlu küresel hiposantr (3D Scatter) görselleştirmesi.")
-
-    if filtered_df.empty:
-        st.warning("⚠️ Seçilen filtre kriterlerine uygun deprem kaydı bulunamadı.")
-    else:
-        u3_choices = [
-            "7. Treemap (Lokasyonlara Göre Küresel Deprem Dağılımı)",
-            "8. Parallel Coordinates (Çok Boyutlu Deprem ve Ölçüm Kalitesi Analizi)",
-            "9. 3D Scatter Plot (3 Boyutlu Küresel Deprem ve Derinlik Dağılımı)"
-        ]
-        chosen_u3 = st.radio("İncelenecek Görselleştirmeyi Seçin (Üye 3):", u3_choices, horizontal=True)
-        st.markdown("---")
-
-        # --- ÜYE 3 GÖRSELLEŞTİRME 7: TREEMAP ---
-        if chosen_u3.startswith("7."):
-            col_tm_ctrl1, col_tm_ctrl2 = st.columns([1, 2])
-            with col_tm_ctrl1:
-                top_n_places = st.slider("Gösterilecek En Aktif Lokasyon Sayısı (Top N):", min_value=5, max_value=30, value=15, step=5)
-            with col_tm_ctrl2:
-                tm_color_mode = st.radio(
-                    "Treemap Renk Skalası:",
-                    ["Üye 3 Özel Palet (#24476B ➔ #E87555)", "RdYlBu_r (Kırmızı-Sarı-Mavi)"],
-                    horizontal=True
-                )
-
-            id_col = "id" if "id" in filtered_df.columns else "mag"
-            tm_data = filtered_df[["place", "mag", id_col]].dropna().copy()
-            summary_tm = (
-                tm_data.groupby("place")
-                .agg(
-                    earthquake_count=(id_col, "count"),
-                    avg_magnitude=("mag", "mean")
-                )
-                .reset_index()
-                .sort_values("earthquake_count", ascending=False)
-                .head(top_n_places)
+    st.markdown(
+        '<div class="ss-section-heading">'
+        '<div class="ss-section-eyebrow">03 / Research modules</div>'
+        '<div class="ss-section-title">Follow the evidence across six views</div>'
+        '</div>', unsafe_allow_html=True,
+    )
+    cards = [
+        ("MEMBER 1", "Geographic & Categorical", "Map, Sankey, Sunburst · geographic and hierarchical distributions."),
+        ("MEMBER 3", "Statistical & Temporal", "Density Contour, Violin, Calendar Heatmap · patterns in time and measurement quality."),
+        ("MEMBER 2", "Multidimensional & 3D", "Treemap, Parallel Coordinates, 3D Scatter · higher-dimensional exploration."),
+    ]
+    cols = st.columns(3, gap="medium")
+    for col, (eyebrow, title, description) in zip(cols, cards):
+        with col:
+            st.markdown(
+                f'<div class="ss-card ss-research-card"><div class="ss-card-accent">{eyebrow}</div>'
+                f'<div class="ss-card-title">{title}</div>'
+                f'<p class="ss-card-text">{description}</p></div>',
+                unsafe_allow_html=True,
+            )
+    cols = st.columns(2, gap="medium")
+    extra = [
+        ("MODEL ANALYSIS", "Machine Learning", "Saved K-Means and Decision Tree models, held-out metrics and historical-event inference."),
+        ("HISTORICAL FOCUS", "Türkiye · 6 February 2023", "Principal events, regional catalog and an idealized P/S-wave demonstration."),
+    ]
+    for col, (eyebrow, title, description) in zip(cols, extra):
+        with col:
+            st.markdown(
+                f'<div class="ss-card ss-research-card"><div class="ss-card-accent">{eyebrow}</div>'
+                f'<div class="ss-card-title">{title}</div>'
+                f'<p class="ss-card-text">{description}</p></div>',
+                unsafe_allow_html=True,
             )
 
-            custom_u3_scale = ["#24476B", "#4C789A", "#F4C66A", "#E87555"] if tm_color_mode.startswith("Üye 3") else "RdYlBu_r"
-
-            ch_col, nt_col = st.columns([3.4, 1.3], gap="large")
-            with ch_col:
-                fig_tm = px.treemap(
-                    summary_tm,
-                    path=["place"],
-                    values="earthquake_count",
-                    color="avg_magnitude",
-                    color_continuous_scale=custom_u3_scale,
-                    hover_data={"earthquake_count": True, "avg_magnitude": ":.2f"},
-                    title=f"Global Earthquake Distribution by Location (İlk {top_n_places} Konum)"
-                )
-                fig_tm.update_traces(
-                    textinfo="label+value",
-                    marker=dict(line=dict(color="white", width=2)),
-                    hovertemplate=(
-                        "<b>%{label}</b><br>"
-                        "Earthquake Count: %{value}<br>"
-                        "Average Magnitude: %{color:.2f} Mw"
-                        "<extra></extra>"
-                    )
-                )
-                fig_tm.update_layout(
-                    height=600,
-                    title_x=0.5,
-                    margin=dict(t=60, l=15, r=15, b=15),
-                    paper_bgcolor=bg_card,
-                    font=dict(color=text_primary, size=13)
-                )
-                st.plotly_chart(fig_tm, use_container_width=True, key="u3_treemap")
-
-            with nt_col:
-                show_scientific_card(
-                    "Her dikdörtgenin alanı o lokasyonda kaydedilen toplam deprem sayısını (`earthquake_count`), rengi ise o bölgedeki ortalama deprem büyüklüğünü (`avg_magnitude`) gösterir.",
-                    "USGS 'place' sütunu merkez üssüne en yakın coğrafi referans noktasını verir. Aynı fay hattı üzerindeki farklı alt bölgeler ayrı kutular halinde listelenebilir."
-                )
-                st.markdown("##### 📊 İlk 15 Konum Özeti")
-                st.dataframe(
-                    summary_tm.rename(columns={"place": "Konum", "earthquake_count": "Kayıt", "avg_magnitude": "Ort. Mw"}).round(2),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=260
-                )
-
-        # --- ÜYE 3 GÖRSELLEŞTİRME 8: PARALLEL COORDINATES ---
-        elif chosen_u3.startswith("8."):
-            st.markdown("#### Multidimensional Earthquake Analysis (Magnitude, Depth & Measurement Quality)")
-            st.caption("Eksenlerin üzerindeki dikey aralıkları fareyle sürükleyerek (brushing) belirli büyüklük, derinlik, istasyon sayısı ve hata aralıklarını filtreleyebilirsiniz.")
-
-            par_cols = ["mag", "depth", "rms", "gap", "nst", "magError"]
-            missing_cols = [c for c in par_cols if c not in filtered_df.columns]
-
-            if missing_cols:
-                st.warning(f"Veri setinde şu sütunlar bulunamadı: {missing_cols}")
+    st.markdown(
+        '<div class="ss-section-heading">'
+        '<div class="ss-section-eyebrow">04 / Historical spotlight</div>'
+        '<div class="ss-section-title">6 February 2023 · Kahramanmaraş sequence</div>'
+        '<p class="ss-section-desc">Documented principal events in the reviewed historical references.</p>'
+        '</div>', unsafe_allow_html=True,
+    )
+    if not REFERENCE_PATH.is_file():
+        st.error(f"Required event reference CSV is missing: {REFERENCE_PATH}")
+    else:
+        refs = pd.read_csv(REFERENCE_PATH)
+        needed = {"id", "time", "mag", "place"}
+        if not needed.issubset(refs.columns):
+            st.error("The 6 February event reference CSV is missing required columns.")
+        else:
+            focus = refs.loc[refs["id"].astype(str).isin(["us6000jllz", "us6000jlqa"])].copy()
+            if len(focus) != 2:
+                st.error("Both principal 6 February events were not found in the reference CSV.")
             else:
-                parallel_df = filtered_df[par_cols].dropna().copy()
-                orig_cnt = len(filtered_df)
-                used_cnt = len(parallel_df)
-                rem_cnt = orig_cnt - used_cnt
-
-                pk1, pk2, pk3 = st.columns(3)
-                pk1.metric("Toplam Seçili Kayıt (Original records)", f"{orig_cnt:,}")
-                pk2.metric("Analizde Kullanılan Tam Kayıt (Records used)", f"{used_cnt:,}")
-                pk3.metric("Eksik Ölçüm Nedeniyle Çıkarılan (Removed)", f"{rem_cnt:,}")
-
-                if parallel_df.empty:
-                    st.info("Seçilen filtrelerde 6 ölçüm parametresinin tamamına sahip kayıt bulunamadı.")
-                else:
-                    fig_par = go.Figure(
-                        data=go.Parcoords(
-                            line=dict(
-                                color=parallel_df["mag"],
-                                colorscale=[
-                                    [0.0, "#24476B"],
-                                    [0.35, "#4C789A"],
-                                    [0.65, "#F4C66A"],
-                                    [1.0, "#E87555"]
-                                ],
-                                cmin=float(parallel_df["mag"].min()),
-                                cmax=float(parallel_df["mag"].max()),
-                                colorbar=dict(title="Magnitude (Mw)"),
-                                showscale=True
-                            ),
-                            dimensions=[
-                                dict(label="Magnitude (Mw)", values=parallel_df["mag"]),
-                                dict(label="Depth (km)", values=parallel_df["depth"]),
-                                dict(label="RMS (Seyahat Süresi Kalıntısı)", values=parallel_df["rms"]),
-                                dict(label="Azimuthal Gap (°)", values=parallel_df["gap"]),
-                                dict(label="Number of Stations (nst)", values=parallel_df["nst"]),
-                                dict(label="Magnitude Error (magError)", values=parallel_df["magError"])
-                            ]
+                cols = st.columns(2, gap="medium")
+                for col, (_, item) in zip(cols, focus.sort_values("time").iterrows()):
+                    with col:
+                        st.markdown(
+                            '<div class="ss-event-strip">'
+                            f'<div class="ss-event-title">M {float(item["mag"]):.1f} · '
+                            f'{"Pazarcık" if item["id"] == "us6000jllz" else "Elbistan"}</div>'
+                            f'<div class="ss-event-desc">6 Feb 2023 · {str(item["time"])[11:16]} UTC · '
+                            f'USGS ID: {item["id"]}</div>'
+                            '</div>', unsafe_allow_html=True,
                         )
-                    )
-                    fig_par.update_layout(
-                        title=dict(
-                            text="Multidimensional Earthquake Analysis — Magnitude, Depth and Measurement Quality",
-                            x=0.5
-                        ),
-                        height=620,
-                        margin=dict(l=80, r=80, t=90, b=50),
-                        paper_bgcolor=bg_card,
-                        plot_bgcolor=bg_card,
-                        font=dict(family="Arial", size=12, color=text_primary)
-                    )
-                    st.plotly_chart(fig_par, use_container_width=True, key="u3_parcoords")
+    st.markdown(
+        '<div class="ss-method-note"><strong>Scientific scope:</strong> '
+        'Historical recorded M4.5+ events are not a complete earthquake inventory. '
+        'Catalog depths may include assigned values; cluster membership is not a hazard zone. '
+        'Neither these visualizations nor the idealized wave simulation forecast earthquakes, '
+        'shaking intensity or damage.</div>', unsafe_allow_html=True,
+    )
 
-                    show_scientific_card(
-                        "Her bir çizgi tek bir depremi temsil eder. Eksenler üzerinde basılı tutup sürükleyerek yüksek istasyon sayılı (`nst`) ve düşük azimut boşluklu (`gap`) kaliteli ölçümleri izole edebilirsiniz.",
-                        "Azimuthal Gap (istasyonlar arası açısal boşluk) küçüldükçe ve istasyon sayısı (`nst`) arttıkça depremin konum/büyüklük belirsizliği (`magError`) azalma eğilimi gösterir."
-                    )
 
-        # --- ÜYE 3 GÖRSELLEŞTİRME 9: 3D SCATTER PLOT ---
-        elif chosen_u3.startswith("9."):
-            st.markdown("#### 3D Global Earthquake Distribution (Boylam × Enlem × Derinlik)")
-            
-            c3d_1, c3d_2 = st.columns([2, 2])
-            with c3d_1:
-                show_10km_3d = st.checkbox(
-                    "Tam 10 km derinlik kayıtlarını 3B uzayda göster (show_10km)",
-                    value=True,
-                    help="İşareti kaldırdığınızda depth == 10 km olan varsayılan kayıtlar gizlenir ve gerçek derinlik katmanları netleşir."
-                )
-            with c3d_2:
-                marker_sz_3d = st.slider("3B Nokta Boyutu (Marker Size):", min_value=2, max_value=7, value=3)
-
-            cols_3d = ["latitude", "longitude", "depth", "mag", "place"]
-            scatter_df = filtered_df[cols_3d].dropna().copy()
-
-            if show_10km_3d:
-                display_3d_df = scatter_df.copy()
-            else:
-                display_3d_df = scatter_df[scatter_df["depth"] != 10].copy()
-
-            st.caption(f"📌 **3B Uzayda Gösterilen Kayıt Sayısı (Displayed records):** `{len(display_3d_df):,}` deprem (Fareyle döndürebilir ve yakınlaştırabilirsiniz)")
-
-            ch_col, nt_col = st.columns([3.5, 1.2], gap="large")
-            with ch_col:
-                fig_3d = px.scatter_3d(
-                    display_3d_df,
-                    x="longitude",
-                    y="latitude",
-                    z="depth",
-                    color="mag",
-                    hover_name="place",
-                    hover_data={"latitude": ":.2f", "longitude": ":.2f", "depth": ":.1f", "mag": ":.1f"},
-                    color_continuous_scale="RdYlBu_r",
-                    title="3D Global Earthquake Distribution (Z Ekseni: Yüzeyden Derine)"
-                )
-                fig_3d.update_traces(marker=dict(size=marker_sz_3d, opacity=0.78))
-                fig_3d.update_layout(
-                    height=680,
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    paper_bgcolor=bg_card,
-                    font=dict(color=text_primary),
-                    scene=dict(
-                        xaxis_title="Longitude (Boylam)",
-                        yaxis_title="Latitude (Enlem)",
-                        zaxis_title="Depth (km)",
-                        zaxis=dict(autorange="reversed"),
-                        bgcolor=input_bg
-                    )
-                )
-                st.plotly_chart(fig_3d, use_container_width=True, key="u3_scatter3d")
-
-            with nt_col:
-                show_scientific_card(
-                    "Z ekseni ters çevrilmiştir (`autorange='reversed'`); böylece yerkabuğu yüzeyi (0 km) en üstte, 600+ km derinliğindeki dalma-batma zonu (subduction zone) depremleri ise altta gerçek fiziksel konumuyla görünür.",
-                    "'show_10km' kutusunu kapattığınızda yüzeyin hemen altındaki yapay 10 km düzlemi kaybolur ve Pasifik Ateş Çemberi boyunca derine dalan Wadati-Benioff kuşakları 3 boyutlu olarak ortaya çıkar."
-                )
-
-# ==========================================
-# SEKME 4: GERÇEK ML EĞİTİM SONUÇLARI
-# ==========================================
-with tab4:
-    st.subheader("🤖 SEISMOSCOPE — Makine Öğrenmesi Model Sonuçları")
-    st.info("📌 **Metodolojik Not:** Bu modeller geçmişte kaydedilmiş sismik olayların örüntülerini inceler; gelecekteki depremlerin zamanı, konumu veya büyüklüğünü tahmin etmez.")
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("K-Means Küme Sayısı", "K = 7", "Silhouette: 0.287")
-    m2.metric("DT Balanced Accuracy", "%78.7", "+%45.4 vs Baseline (%33.3)")
-    m3.metric("DT Macro F1 Skoru", "0.625", "Kronolojik Test: 1,978 Olay")
-    m4.metric("DT Overall Accuracy", "%69.8", "Eğitim/Test: 7,911 / 1,978")
-    
-    st.markdown("---")
-    ml_left, ml_right = st.columns(2)
-    
-    with ml_left:
-        st.markdown("#### 1. Model 1 — K-Means Clustering (Gözetimsiz Öğrenme)")
-        st.markdown("""
-        * **Özellik Uzayı:** Jeodezik birim küre koordinatları (`geo_x/y/z`), `mag` ve `log1p(depth)` (`StandardScaler` ile ölçeklendi).
-        * **Küme Seçimi:** `K = 7` küme, 1.500 örneklem üzerinde **0.287** Silhouette skoru ile belirlendi.
-        """)
-        
-        cluster_sizes = pd.DataFrame({
-            'Küme': ['Küme 0', 'Küme 1', 'Küme 2', 'Küme 3', 'Küme 4', 'Küme 5', 'Küme 6'],
-            'Olay Sayısı': [645, 751, 1315, 1587, 1236, 3235, 1120]
-        })
-        fig_clusters = px.bar(
-            cluster_sizes, x='Küme', y='Olay Sayısı', color='Olay Sayısı',
-            text='Olay Sayısı', color_continuous_scale='Tealgrn',
-            title="K-Means (K=7) Küme Boyutları Dağılımı (Toplam: 9,889 Olay)",
-            height=380
+def show_geographic(data: pd.DataFrame) -> None:
+    st.subheader("Geographic & Categorical Analysis · Member 1")
+    choice = choose_chart("Visualization", ["Geographic Map", "Sankey Diagram", "Sunburst"], key="m1_chart")
+    if choice == "Geographic Map":
+        mode = st.radio("Map mode", ["2D Map", "Orthographic Globe", "Monthly Animation"],
+                        horizontal=True, key="m1_map_mode")
+        plot_with_note(
+            create_geographic_map(data, mode), "m1_map",
+            "Each dot is a catalogued epicenter. Magnitude controls size and color. "
+            "The animation is grouped by UTC month.",
+            "Marker size does not represent actual shaking area. This catalog includes "
+            "recorded M4.5+ events, not all earthquakes.",
         )
-        fig_clusters.update_traces(textposition='outside')
-        fig_clusters.update_layout(paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary))
-        st.plotly_chart(fig_clusters, use_container_width=True)
-        
-        cluster_prof_path = find_file("cluster_profiles.csv")
-        if cluster_prof_path:
-            with st.expander("📋 Küme Profilleri Tablosunu Aç (cluster_profiles.csv)"):
-                st.dataframe(pd.read_csv(cluster_prof_path), use_container_width=True)
-
-    with ml_right:
-        st.markdown("#### 2. Model 2 — Decision Tree Classification (`depth_category`)")
-        st.markdown("""
-        * **Hedef:** `depth_category` (Sığ / Orta / Derin). Veri sızıntısını önlemek için `depth` sütunu girdi olarak **kullanılmamıştır**.
-        * **Neden Balanced Accuracy?** Çoğunluk sınıfı baseline modeli tüm depremlere "Sığ" diyerek %77.6 sıradan doğruluk alır ancak orta/derin depremleri hiç yakalayamaz (Balanced Acc: **%33.3**). Karar ağacımız ise **%78.7 Balanced Accuracy** ile tüm derinlik sınıflarını dengeli biçimde ayrıştırır.
-        """)
-        
-        comp_df = pd.DataFrame({
-            'Metrik': ['Balanced Accuracy (%)', 'Overall Accuracy (%)', 'Macro F1 (x100)'],
-            'Decision Tree (Modelimiz)': [78.7, 69.8, 62.5],
-            'Majority Baseline': [33.3, 77.6, 29.1]
-        })
-        fig_comp = px.bar(
-            comp_df, x='Metrik', y=['Decision Tree (Modelimiz)', 'Majority Baseline'],
-            barmode='group', text_auto='.1f',
-            title="Decision Tree vs. Baseline Performans Karşılaştırması",
-            height=380, color_discrete_sequence=['#0284c7', '#94a3b8']
+    elif choice == "Sankey Diagram":
+        plot_with_note(
+            create_sankey_diagram(data), "m1_sankey",
+            "Read links from magnitude band to depth category and hemisphere. "
+            "Their widths represent record counts.",
+            "Links are descriptive category combinations, not physical migration or causation.",
         )
-        fig_comp.update_layout(paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary), yaxis_title="Skor (%)")
-        st.plotly_chart(fig_comp, use_container_width=True)
-
-        with st.expander("🧪 Deneysel Model: Decision Tree Regression (Neden Elendi?)"):
-            st.markdown("""
-            * **Hedef:** Deprem büyüklüğü (`mag`) tahmini.
-            * **Sonuç:** Kronolojik test `MAE: 0.2643` (Sabit ortalama baseline `MAE: 0.2605`), `R²: -0.0251`.
-            * **Bilimsel Karar:** Baseline modelden daha düşük performans gösterdiği için şeffaflık ilkesi gereği elenmiş ve raporlanmıştır.
-            """)
-
-    scored_events_path = find_file("ml_scored_events.csv")
-    if scored_events_path:
-        st.markdown("---")
-        st.markdown("#### 🌐 K-Means Kümelerinin Küresel Harita Üzerindeki Dağılımı (`ml_scored_events.csv`)")
-        scored_df = pd.read_csv(scored_events_path)
-        cluster_col = next((c for c in ['cluster', 'kmeans_cluster', 'cluster_id'] if c in scored_df.columns), None)
-        if cluster_col:
-            scored_df[cluster_col] = "Küme " + scored_df[cluster_col].astype(str)
-            fig_ml_map = render_interactive_map(
-                scored_df, lat_col="latitude", lon_col="longitude", color_col=cluster_col,
-                hover_data=['mag', 'depth'], zoom=1.25, height=480,
-                discrete_seq=px.colors.qualitative.Bold
-            )
-            st.plotly_chart(fig_ml_map, use_container_width=True)
-
-# ==========================================
-# SEKME 5: 6 ŞUBAT 2023 TÜRKİYE ÖZEL ANALİZİ & DALGA SİMÜLATÖRÜ
-# ==========================================
-with tab5:
-    st.subheader("🇹🇷 6 Şubat 2023 Kahramanmaraş Depremleri Özel İncelemesi")
-    st.markdown("Doğu Anadolu Fay Hattı üzerinde meydana gelen **7.8 Mw (Pazarcık)** ve **7.5 Mw (Elbistan)** ana şokları ile artçı sarsıntıların mekansal-zamansal analizi ve sismik dalga yayılım simülasyonu.")
-    
-    tr_df = df[
-        (df['latitude'] >= 35.5) & (df['latitude'] <= 42.5) &
-        (df['longitude'] >= 25.5) & (df['longitude'] <= 45.0)
-    ].copy()
-    
-    if tr_df.empty:
-        st.warning("Veri setinde Türkiye koordinat aralığında kayıt bulunamadı.")
+        if not data.empty:
+            counts = data.groupby("magnitude_band", observed=True).size().reset_index(name="Records")
+            st.dataframe(counts, width="stretch", hide_index=True)
     else:
-        tr_k1, tr_k2, tr_k3, tr_k4 = st.columns(4)
-        tr_k1.metric("Türkiye Bölgesi Kayıt", f"{len(tr_df):,} deprem")
-        tr_k2.metric("Ana Şok (Maksimum)", f"{tr_df['mag'].max():.1f} Mw", "6 Şubat 2023 - 01:17 UTC")
-        tr_k3.metric("Ortalama Derinlik", f"{tr_df['depth'].mean():.1f} km", "Yüzeye Yakın / Sığ Kırılma")
-        tr_k4.metric("Güçlü Sarsıntılar (M ≥ 6.0)", f"{len(tr_df[tr_df['mag'] >= 6.0]):,}")
-        
-        focus_spot = st.radio(
-            "🎯 Harita Kamera Odağı (Sunum Kısa Yolu):",
-            ["Genel Deprem Bölgesi", "Pazarcık Ana Şok (7.8 Mw)", "Elbistan İkinci Ana Şok (7.5 Mw)", "Hatay / Antakya Kırığı (6.3 Mw)"],
-            horizontal=True
+        plot_with_note(
+            create_sunburst(data), "m1_sunburst",
+            "The concentric rings group hemisphere, magnitude band and depth category.",
+            "The categories provide descriptive organization, not a physical earthquake model.",
         )
-        focus_coords = {
-            "Genel Deprem Bölgesi": (37.5, 37.0, 5.8),
-            "Pazarcık Ana Şok (7.8 Mw)": (37.226, 37.014, 8.0),
-            "Elbistan İkinci Ana Şok (7.5 Mw)": (38.024, 37.203, 8.0),
-            "Hatay / Antakya Kırığı (6.3 Mw)": (36.126, 36.026, 8.0)
+        if not data.empty:
+            summary = data.groupby("latitude_hemisphere", observed=True).agg(
+                Records=("id", "size"), Mean_magnitude=("mag", "mean")
+            ).reset_index()
+            st.dataframe(summary.round(2), width="stretch", hide_index=True)
+
+
+def show_multidimensional(data: pd.DataFrame) -> None:
+    st.subheader("Multidimensional & 3D Analysis · Member 2")
+    choice = choose_chart("Visualization", ["Treemap", "Parallel Coordinates", "3D Scatter"], key="m2_chart")
+    if choice == "Treemap":
+        a, b = st.columns(2)
+        top_n = a.slider("Top N locations", 5, 30, 15, 5, key="m2_top_n")
+        palette = b.selectbox("Color palette", ["Member 2 final", "RdYlBu_r"], key="m2_palette")
+        plot_with_note(
+            create_treemap(data, top_n, palette), "m2_treemap",
+            "Tile area is the count of recorded events sharing a USGS place label. "
+            "Color shows mean magnitude.",
+            "Place labels are descriptive strings, not standardized administrative regions.",
+        )
+        st.markdown("#### Top locations — statistical summary")
+        summary = summarize_locations(data, top_n)
+        if summary.empty:
+            st.info("No locations match these filters.")
+        else:
+            st.dataframe(summary.round(2), width="stretch", hide_index=True)
+    elif choice == "Parallel Coordinates":
+        complete = complete_measurements(data)
+        a, b, c = st.columns(3)
+        a.metric("Selected records", f"{len(data):,}")
+        b.metric("Complete measurements", f"{len(complete):,}")
+        c.metric("Excluded for missingness", f"{len(data) - len(complete):,}")
+        plot_with_note(
+            create_parallel_coordinates(data), "m2_parallel",
+            "Each polyline is one complete earthquake measurement. Brush any vertical "
+            "axis to highlight subsets.",
+            "Records missing any of the six measurements are omitted from this figure.",
+        )
+    else:
+        a, b = st.columns(2)
+        show_ten = a.checkbox("Show exact-10-km records in 3D", value=True, key="m2_show_10")
+        marker = b.slider("Marker size", min_value=2, max_value=7, value=3, key="m2_marker")
+        valid = prepare_3d_data(data, show_ten)
+        st.caption(f"Displayed valid records: {len(valid):,}")
+        plot_with_note(
+            create_scatter_3d(data, show_ten, marker), "m2_scatter3d",
+            "Rotate and zoom longitude, latitude and hypocentral depth. Magnitude is color.",
+            "The depth axis is reversed. Some 10-km entries may be assigned catalog "
+            "depths; removing them is a sensitivity check, not a correction.",
+        )
+
+
+def show_statistical(data: pd.DataFrame, all_data: pd.DataFrame,
+                     selected_dates: tuple[date, date] | list[date] | None) -> None:
+    st.subheader("Statistical & Temporal Analysis · Member 3")
+    choice = choose_chart("Visualization", ["Density Contour", "Violin Plot", "Calendar Heatmap"], key="m3_chart")
+    if choice == "Density Contour":
+        view = st.selectbox("Chart range", ["Focused View", "Full Range"], key="m3_range")
+        overview, detailed = st.tabs(["Overview Contours", "Detailed Bins"])
+        with overview:
+            plot_with_note(
+                create_density_contour_smoothed(data, view), "m3_density_overview",
+                "Automatically selected histogram bins reveal broad magnitude–depth concentration.",
+                "This is a 2D histogram contour, not KDE. Some 10-km depths may be assigned.",
+            )
+        with detailed:
+            plot_with_note(
+                create_density_contour_binned(data, view), "m3_density_detailed",
+                "Fine bins (0.05 magnitude × 10 km depth) reveal localized variation.",
+                "Counts per bin depend on bin width; these two colorbars are not "
+                "directly comparable.",
+            )
+    elif choice == "Violin Plot":
+        # Preserve the three methods verified in the independent member project.
+        methods = ["mb", "mww", "mwr"]
+        selected = st.multiselect("Magnitude methods", methods, default=methods, key="m3_methods")
+        valid = data.loc[data["magType"].isin(selected), ["magType", "magError"]].copy()
+        valid["magError"] = pd.to_numeric(valid["magError"], errors="coerce")
+        valid = valid.dropna(subset=["magError"])
+        valid = valid.loc[valid["magError"] >= 0]
+        a, b, c = st.columns(3)
+        a.metric("Valid measurements", f"{len(valid):,}")
+        b.metric("Methods selected", len(selected))
+        c.metric("Median magnitude uncertainty",
+                 f"{valid['magError'].median():.3f}" if not valid.empty else "—")
+        plot_with_note(
+            create_violin_plot(data, selected), "m3_violin",
+            "Each violin shows the distribution of reported magnitude uncertainty. "
+            "The inner box shows quartiles and median.",
+            "Different measurement methods apply under different conditions. A smaller "
+            "reported magError alone does not establish superior accuracy.",
+        )
+        st.markdown("#### Statistical summary")
+        if valid.empty:
+            st.info("No valid uncertainty measurements for these filters.")
+        else:
+            table = valid.groupby("magType")["magError"].agg(
+                Records="size", Median="median", Mean="mean", Std_Dev="std"
+            ).reindex(selected).round(3).reset_index().rename(columns={"magType": "Method"})
+            st.dataframe(table, width="stretch", hide_index=True)
+    else:
+        years = sorted(all_data["event_date_utc"].dt.year.unique().astype(int).tolist())
+        a, b = st.columns([1, 2])
+        year = a.selectbox("Calendar year", years, key="m3_year")
+        scope = b.selectbox("Geographic scope", ["Global", "6 Feb epicentral region (approximate)"],
+                            key="m3_scope")
+        calendar = data.copy()
+        if scope != "Global":
+            calendar = calendar.loc[calendar["latitude"].between(35, 40)
+                                    & calendar["longitude"].between(34, 41)].copy()
+        year_data = calendar.loc[calendar["event_date_utc"].dt.year.eq(year)].copy()
+        daily = year_data.groupby("event_date_utc").size()
+        a, b, c = st.columns(3)
+        a.metric("Events in selected year", f"{len(year_data):,}")
+        b.metric("Peak daily count", f"{int(daily.max()) if not daily.empty else 0:,}")
+        if year == 2023:
+            c.metric("6 Feb 2023 (UTC)", f"{int(daily.get(pd.Timestamp('2023-02-06'), 0)):,}")
+        else:
+            c.metric("Days with records", f"{len(daily):,}")
+        min_day = all_data["event_date_utc"].min().date()
+        max_day = all_data["event_date_utc"].max().date()
+        start, end = ((selected_dates[0], selected_dates[1])
+                      if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2
+                      else (min_day, min_day))
+        global_daily_max = int(all_data.groupby("event_date_utc").size().max())
+        plot_with_note(
+            create_calendar_heatmap(calendar, int(year), start, end,
+                                    scale_max=global_daily_max), "m3_calendar",
+            "Each square is one UTC day; hover for its catalogued event count. "
+            "Amber highlights 6 February 2023.",
+            "Color uses log(1 + count). The regional rectangle (35–40°N, 34–41°E) "
+            "does not establish aftershock membership.",
+        )
+        st.markdown("#### Most active days")
+        if daily.empty:
+            st.info("No earthquake records match this year and selection.")
+        else:
+            top = daily.sort_values(ascending=False).head(5).rename_axis("UTC date").reset_index(name="Recorded events")
+            st.dataframe(top, width="stretch", hide_index=True)
+
+
+@st.cache_resource(show_spinner="Opening trained ML models...")
+def load_saved_models():
+    """Load trusted local artifacts created by python -m ml.train_models."""
+    km_path = MODELS_DIR / "kmeans_pipeline.joblib"
+    tree_path = MODELS_DIR / "decision_tree_classifier.joblib"
+    if not km_path.is_file() or not tree_path.is_file():
+        raise FileNotFoundError("Trained K-Means / Decision Tree .joblib files are missing.")
+    return joblib.load(km_path), joblib.load(tree_path)
+
+
+def show_ml(data: pd.DataFrame) -> None:
+    needed = [REPORTS_DIR / "metrics.json", REPORTS_DIR / "ml_scored_events.csv",
+              REPORTS_DIR / "cluster_profiles.csv"]
+    missing = [str(p) for p in needed if not p.is_file()]
+    if missing:
+        st.error("Real ML reports are missing: " + ", ".join(missing))
+        return
+    try:
+        cluster_model, tree_model = load_saved_models()
+    except (FileNotFoundError, ValueError, ImportError) as exc:
+        st.error(f"Could not load trained ML model artifacts: {exc}")
+        return
+
+    # Reported metrics are fixed held-out results; filters do not retrain models.
+    render_ml_section(data)
+
+    with st.expander("Verify live inference using saved trained models"):
+        valid = data.dropna(subset=["id", "latitude", "longitude", "mag", "depth"])
+        if valid.empty:
+            st.info("No filtered historical events are available for model inference.")
+            return
+        event_ids = valid["id"].astype(str).tolist()
+        default_id = "us6000jllz"
+        initial = event_ids.index(default_id) if default_id in event_ids else 0
+        chosen = st.selectbox("Historical USGS event ID", event_ids, index=initial,
+                              key="ml_event_id")
+        event = valid.loc[valid["id"].astype(str).eq(chosen)].iloc[[0]]
+        predicted_group = int(cluster_model.predict(clustering_features(event))[0])
+        predicted_depth = str(tree_model.predict(classification_features(event))[0])
+        st.write(f"**K-Means cluster:** {predicted_group}")
+        st.write(f"**Decision Tree predicted recorded-depth class:** {predicted_depth}")
+        st.write(f"**Actual catalogued depth class:** {event.iloc[0]['depth_category']}")
+        st.caption("This is inference on a known historical event. The classifier predicts "
+                   "an existing depth category, not a future earthquake. K-Means was fitted "
+                   "on the full historical catalog; the tree used a chronological train/test split.")
+
+
+CITY_CENTERS = [
+    ("Kahramanmaraş", 37.575, 36.922), ("Gaziantep", 37.066, 37.378),
+    ("Osmaniye", 37.074, 36.246), ("Adıyaman", 37.764, 38.278),
+    ("Kilis", 36.718, 37.121), ("Hatay (Antakya)", 36.202, 36.160),
+    ("Malatya", 38.355, 38.309), ("Adana", 37.000, 35.321),
+    ("Şanlıurfa", 37.159, 38.796), ("Mersin", 36.812, 34.641),
+    ("Diyarbakır", 37.914, 40.230), ("Kayseri", 38.731, 35.478),
+]
+
+
+def haversine_km(lat1: float, lon1: float, lat2: np.ndarray, lon2: np.ndarray) -> np.ndarray:
+    """Surface great-circle distance between epicenter and city coordinates (km)."""
+    radius = 6371.0
+    a1 = np.radians(lat1)
+    a2 = np.radians(lat2)
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a = np.sin(dlat / 2) ** 2 + np.cos(a1) * np.cos(a2) * np.sin(dlon / 2) ** 2
+    return radius * 2 * np.arcsin(np.sqrt(a))
+
+
+def wave_circle(lat: float, lon: float, km: float, points: int = 121) -> pd.DataFrame:
+    """Spherical small-circle for a simplified idealized wavefront illustration."""
+    theta = np.linspace(0, 2 * np.pi, points)
+    angular = km / 6371.0
+    phi = np.radians(lat)
+    lam = np.radians(lon)
+    p2 = np.arcsin(np.clip(np.sin(phi) * np.cos(angular)
+                           + np.cos(phi) * np.sin(angular) * np.cos(theta), -1, 1))
+    l2 = lam + np.arctan2(np.sin(theta) * np.sin(angular) * np.cos(phi),
+                          np.cos(angular) - np.sin(phi) * np.sin(p2))
+    return pd.DataFrame({"latitude": np.degrees(p2),
+                         "longitude": ((np.degrees(l2) + 180) % 360) - 180})
+
+
+def simulation_table(lat: float, lon: float, depth: float, t_seconds: int):
+    p_speed, s_speed = 6.0, 3.5  # illustrative constant km/s velocities
+    cities = pd.DataFrame(CITY_CENTERS, columns=["City", "latitude", "longitude"])
+    epi = haversine_km(lat, lon, cities["latitude"].to_numpy(), cities["longitude"].to_numpy())
+    hypo = np.sqrt(epi ** 2 + depth ** 2)
+    cities["Epicentral distance (km)"] = np.round(epi, 1)
+    cities["P arrival (s)"] = np.round(hypo / p_speed, 1)
+    cities["S arrival (s)"] = np.round(hypo / s_speed, 1)
+    cities["S minus P (s)"] = np.round(hypo / s_speed - hypo / p_speed, 1)
+    cities["Status"] = np.select(
+        [t_seconds >= hypo / s_speed, t_seconds >= hypo / p_speed],
+        ["S wave arrived (model)", "P wave arrived (model)"],
+        default="Neither arrived (model)",
+    )
+    return cities.sort_values("Epicentral distance (km)").reset_index(drop=True)
+
+
+def show_wave_simulator(catalog: pd.DataFrame, refs: pd.DataFrame) -> None:
+    st.markdown("---")
+    st.subheader("Idealized P/S seismic-wave travel demonstration")
+    st.caption("Educational constant-speed model: P ≈ 6.0 km/s and S ≈ 3.5 km/s. "
+               "Not a measured wavefield, shaking intensity, damage footprint, or "
+               "operational early-warning forecast.")
+
+    # Two reference events come from the reviewed official event record file.
+    options = refs.copy()
+    optional_hatay = catalog.loc[catalog["id"].eq("us6000jqcn")]
+    if not optional_hatay.empty:
+        options = pd.concat([options, optional_hatay[refs.columns]], ignore_index=True)
+    names = []
+    for _, event in options.iterrows():
+        event_date = str(event["time"])[:10]
+        names.append(f"{event_date} · M{event['mag']:.1f} · {event['place']}")
+    a, b = st.columns([2, 3])
+    selection = a.selectbox("Recorded epicenter", list(range(len(options))),
+                            format_func=lambda i: names[i], key="wave_event")
+    seconds = b.slider("Seconds after origin time (idealized)", 5, 110, 40, 5,
+                       key="wave_elapsed")
+    record = options.iloc[selection]
+    lat, lon, depth = (float(record[name]) for name in ("latitude", "longitude", "depth"))
+    p_speed, s_speed = 6.0, 3.5
+    p_radius = np.sqrt(max(0.0, (p_speed * seconds) ** 2 - depth ** 2))
+    s_radius = np.sqrt(max(0.0, (s_speed * seconds) ** 2 - depth ** 2))
+    result = simulation_table(lat, lon, depth, seconds)
+    count_s = int(result["Status"].eq("S wave arrived (model)").sum())
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("P-wave surface radius", f"{p_radius:,.1f} km")
+    k2.metric("S-wave surface radius", f"{s_radius:,.1f} km")
+    k3.metric("Illustrative S-front area", f"{np.pi * s_radius**2:,.0f} km²")
+    k4.metric("City centers reached by S (model)", f"{count_s} / {len(result)}")
+
+    rings = []
+    for label, radius in [("P-wave front", p_radius), ("S-wave front", s_radius)]:
+        ring = wave_circle(lat, lon, float(radius))
+        ring["Wave"] = label
+        rings.append(ring)
+    ring_df = pd.concat(rings, ignore_index=True)
+    line_fn = px.line_map if hasattr(px, "line_map") else px.line_mapbox
+    scatter_fn = px.scatter_map if hasattr(px, "scatter_map") else px.scatter_mapbox
+    fig = line_fn(ring_df, lat="latitude", lon="longitude", color="Wave",
+                  color_discrete_map={"P-wave front": "#0284c7", "S-wave front": "#E11D48"},
+                  center={"lat": lat, "lon": lon}, zoom=5.6, height=480)
+    fig.update_traces(line=dict(width=3.5))
+    colors = {
+        "S wave arrived (model)": "#E11D48",
+        "P wave arrived (model)": "#F59E0B",
+        "Neither arrived (model)": "#10B981",
+    }
+    dot = scatter_fn(result, lat="latitude", lon="longitude", color="Status",
+                     hover_name="City", color_discrete_map=colors,
+                     hover_data={"Epicentral distance (km)": True,
+                                 "P arrival (s)": True, "S arrival (s)": True,
+                                 "latitude": False, "longitude": False})
+    dot.update_traces(marker=dict(size=12))
+    for trace in dot.data:
+        fig.add_trace(trace)
+    if hasattr(px, "line_map"):
+        fig.update_layout(map_style="carto-positron")
+    else:
+        fig.update_layout(mapbox_style="carto-positron")
+    fig.update_layout(title=f"Idealized travel fronts at t = {seconds} s",
+                      margin=dict(l=0, r=0, t=50, b=0), legend=dict(orientation="h"))
+
+    chart = px.bar(result.sort_values("Epicentral distance (km)", ascending=False),
+                   y="City", x=["P arrival (s)", "S arrival (s)"], orientation="h",
+                   barmode="group", height=480,
+                   color_discrete_sequence=["#0284c7", "#E11D48"],
+                   title="Idealized arrival time at selected city centers")
+    chart.add_vline(x=seconds, line_dash="dash", line_color=TEAL,
+                    annotation_text=f"Selected t = {seconds} s")
+    left, right = st.columns([3, 2])
+    with left:
+        st.plotly_chart(fig, width="stretch", key="wave_map")
+    with right:
+        st.plotly_chart(chart, width="stretch", key="wave_arrivals")
+    with st.expander("City-by-city distances and illustrative arrival times", expanded=True):
+        st.dataframe(result.drop(columns=["latitude", "longitude"]),
+                     width="stretch", hide_index=True)
+    st.warning("This assumes constant wave speeds and straight-line hypocentral travel. "
+               "Real seismic waves depend on geology, paths, phases and site effects. "
+               "The S–P time difference is not a measured or guaranteed warning window. "
+               "Neither arrival nor radius indicates how damaging shaking would be.")
+
+
+def show_february_6(catalog: pd.DataFrame) -> None:
+    """Sixth dashboard view: referenced events, regional context and wave demo.
+
+    Keep the three explorations separate to avoid an excessively long page.
+    This is an interface refactor only: the source records, regional selection,
+    plots, and idealized P/S travel-time calculations are not changed.
+    """
+    st.markdown(
+        '<div class="ss-section-heading">'
+        '<div class="ss-section-eyebrow">06 / HISTORICAL FOCUS</div>'
+        '<div class="ss-section-title">Türkiye · 6 February 2023</div>'
+        '<p class="ss-section-desc">Documented major events, regional catalogue context and a '
+        'simplified seismic-wave demonstration.</p>'
+        '</div>', unsafe_allow_html=True,
+    )
+    st.caption("The regional sample is geographical, not a verified aftershock catalogue. "
+               "The wave model is illustrative, not a forecast or damage estimate.")
+    if not REFERENCE_PATH.is_file():
+        st.error(f"Reference file for the two documented main events is missing: {REFERENCE_PATH}")
+        return
+    refs = pd.read_csv(REFERENCE_PATH)
+    required = {"id", "time", "latitude", "longitude", "depth", "mag", "place"}
+    if required - set(refs.columns) or len(refs) < 2:
+        st.error("The 6 February reference CSV is incomplete.")
+        return
+
+    section = st.radio(
+        "Explore Türkiye 2023",
+        ["Historical Events", "Regional Analysis", "Wave Simulation"],
+        horizontal=True, key="feb6_section",
+    )
+
+    if section == "Historical Events":
+        st.markdown("#### Documented principal earthquakes")
+        st.dataframe(
+            refs[["time", "place", "mag", "depth", "latitude", "longitude", "id"]],
+            hide_index=True, width="stretch",
+        )
+        a, b = st.columns(2)
+        with a:
+            st.markdown(
+                '<div class="ss-event-strip">'
+                '<div class="ss-event-title">M7.8 · Pazarcık</div>'
+                '<div class="ss-event-desc">6 February 2023 · 01:17 UTC · '
+                'USGS ID: us6000jllz</div></div>', unsafe_allow_html=True,
+            )
+        with b:
+            st.markdown(
+                '<div class="ss-event-strip">'
+                '<div class="ss-event-title">M7.5 · Elbistan</div>'
+                '<div class="ss-event-desc">6 February 2023 · 10:24 UTC · '
+                'USGS ID: us6000jlqa</div></div>', unsafe_allow_html=True,
+            )
+        st.info("These are historical source records. This dashboard does not "
+                "classify other nearby earthquakes as verified aftershocks.")
+        return
+
+    if section == "Wave Simulation":
+        show_wave_simulator(catalog, refs)
+        return
+
+    # Regional Analysis: preserve original geographical rectangle and date logic.
+    st.markdown("#### Regional seismicity · geographic sample")
+    start = date(2023, 2, 1)
+    finish = min(date(2023, 3, 6), catalog["event_date_utc"].max().date())
+    date_window = st.date_input(
+        "Regional UTC analysis window", (start, finish),
+        min_value=catalog["event_date_utc"].min().date(),
+        max_value=catalog["event_date_utc"].max().date(), key="feb6_window",
+    )
+    if not isinstance(date_window, (tuple, list)) or len(date_window) != 2:
+        region = catalog.iloc[0:0].copy()
+    else:
+        region = catalog.loc[
+            catalog["latitude"].between(35.5, 42.5)
+            & catalog["longitude"].between(25.5, 45.0)
+            & catalog["event_date_utc"].dt.date.between(*date_window)
+        ].copy()
+    a, b, c = st.columns(3)
+    a.metric("Catalogued events in region/window", f"{len(region):,}")
+    b.metric("Max reported magnitude", f"{region['mag'].max():.1f}" if not region.empty else "—")
+    c.metric("Median depth", f"{region['depth'].median():.1f} km" if not region.empty else "—")
+    if region.empty:
+        st.info("No events match the selected regional window.")
+    else:
+        focus = st.radio(
+            "Map focus",
+            ["Earthquake region", "Pazarcık · M7.8", "Elbistan · M7.5", "Hatay / Antakya"],
+            horizontal=True, key="feb6_focus",
+        )
+        centers = {
+            "Earthquake region": (37.5, 37.0, 5.7),
+            "Pazarcık · M7.8": (37.2256, 37.0143, 8.0),
+            "Elbistan · M7.5": (38.0106, 37.1962, 8.0),
+            "Hatay / Antakya": (36.1616, 36.0251, 8.0),
         }
-        c_lat, c_lon, c_zoom = focus_coords[focus_spot]
+        lat, lon, zoom = centers[focus]
+        view = region.copy()
+        view["point_size"] = (view["mag"].sub(4).clip(lower=0.25) ** 2.1)
+        map_fn = px.scatter_map if hasattr(px, "scatter_map") else px.scatter_mapbox
+        map_fig = map_fn(
+            view, lat="latitude", lon="longitude", color="mag", size="point_size",
+            size_max=18, hover_name="place",
+            hover_data={"mag": ":.1f", "depth": ":.1f", "point_size": False},
+            color_continuous_scale="YlOrRd", center={"lat": lat, "lon": lon},
+            zoom=zoom, height=450, title="Catalogued regional epicenters",
+        )
+        if hasattr(px, "scatter_map"):
+            map_fig.update_layout(map_style="carto-positron")
+        else:
+            map_fig.update_layout(mapbox_style="carto-positron")
+        timeline = px.scatter(
+            view.sort_values("event_date_utc"), x="event_date_utc", y="mag",
+            color="depth", size="point_size", size_max=16, hover_name="place",
+            color_continuous_scale="Plasma", height=450,
+            title="Recorded magnitude versus UTC date",
+        )
+        left, right = st.columns([3, 2])
+        with left:
+            st.plotly_chart(map_fig, width="stretch", key="feb6_event_map")
+        with right:
+            st.plotly_chart(timeline, width="stretch", key="feb6_timeline")
+        st.caption("The selected rectangle (35.5–42.5°N, 25.5–45°E) can include "
+                   "earthquakes unrelated to the February 6 sequence.")
 
-        col_tr_map, col_tr_time = st.columns([3, 2])
-        
-        with col_tr_map:
-            tr_df['size_mag'] = ((tr_df['mag'] - 4.0).clip(lower=0.3) ** 2.2).round(2)
-            fig_tr_map = render_interactive_map(
-                tr_df, lat_col="latitude", lon_col="longitude", color_col="mag", size_col="size_mag",
-                hover_name="place" if "place" in tr_df.columns else None,
-                hover_data={'mag': ':.1f', 'depth': ':.1f', 'date_only': True, 'size_mag': False},
-                zoom=c_zoom, center={"lat": c_lat, "lon": c_lon}, height=470, color_scale="YlOrRd",
-                title="Doğu Anadolu Fay Hattı Kırılma Zonu ve Artçı Dağılımı"
-            )
-            st.plotly_chart(fig_tr_map, use_container_width=True)
-            
-        with col_tr_time:
-            fig_tr_timeline = px.scatter(
-                tr_df.sort_values('time_parsed'), x="time_parsed", y="mag",
-                color="depth", size="size_mag",
-                color_continuous_scale="Plasma",
-                hover_name="place" if "place" in tr_df.columns else None,
-                title="Zaman İçinde Büyüklük (Mw) ve Derinlik (km) Evrimi",
-                labels={"time_parsed": "Tarih", "mag": "Büyüklük (Mw)", "depth": "Derinlik (km)"},
-                height=470
-            )
-            fig_tr_timeline.update_layout(paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary))
-            st.plotly_chart(fig_tr_timeline, use_container_width=True)
 
-        # SİSMİK DALGA YAYILIM VE ETKİ ALANI SİMÜLATÖRÜ
-        st.markdown("---")
-        st.subheader("🌊 Sismik Dalga Yayılım ve Etki Alanı Simülatörü (Kaç Saniyede Kaç KM?)")
-        st.caption("Sismik kabuk modeline göre Birincil **P-Dalgası (~6.0 km/sn)** ve Yıkıcı **S-Dalgası (~3.5 km/sn)** hızlarıyla depremin saniye saniye kapsadığı coğrafi alan ve illere ulaşma süresi.")
+def main() -> None:
+    try:
+        all_data = load_catalog()
+    except (OSError, ValueError, pd.errors.ParserError) as error:
+        st.error(f"SEISMOSCOPE cannot load its reviewed dataset: {error}")
+        st.stop()
 
-        sim_col1, sim_col2 = st.columns([1, 2])
-        with sim_col1:
-            sim_event = st.selectbox(
-                "📌 Simüle Edilecek Deprem Merkez Üssü:",
-                [
-                    "Pazarcık Ana Şok (7.8 Mw - Derinlik: 10.0 km)",
-                    "Elbistan İkinci Ana Şok (7.5 Mw - Derinlik: 7.4 km)",
-                    "Hatay / Yayladağı (6.3 Mw - Derinlik: 16.0 km)"
-                ]
-            )
-        with sim_col2:
-            elapsed_sec = st.slider(
-                "⏱️ Kırılma Anından İtibaren Geçen Süre (Saniye):",
-                min_value=5, max_value=110, value=40, step=5
-            )
+    min_day = all_data["event_date_utc"].min().date()
+    max_day = all_data["event_date_utc"].max().date()
+    lower_mag = float(np.floor(all_data["mag"].min() * 10) / 10)
+    upper_mag = float(np.ceil(all_data["mag"].max() * 10) / 10)
 
-        event_params = {
-            "Pazarcık Ana Şok (7.8 Mw - Derinlik: 10.0 km)": (37.226, 37.014, 10.0, 7.8),
-            "Elbistan İkinci Ana Şok (7.5 Mw - Derinlik: 7.4 km)": (38.024, 37.203, 7.4, 7.5),
-            "Hatay / Yayladağı (6.3 Mw - Derinlik: 16.0 km)": (36.126, 36.026, 16.0, 6.3)
-        }
-        ep_lat, ep_lon, ep_depth, ep_mag = event_params[sim_event]
+    with st.sidebar:
+        st.markdown(
+            '<div class="ss-brand-shell">'
+            '<div class="ss-brand-kicker">GLOBAL SEISMIC INTELLIGENCE</div>'
+            '<div class="ss-brand-name">◈ SEISMOSCOPE</div>'
+            '<div class="ss-brand-sub">HISTORICAL CATALOG · FILTERS</div>'
+            '</div>', unsafe_allow_html=True,
+        )
+        st.caption("USGS ANSS ComCat · global M4.5+ · UTC")
+        mag = st.slider("Magnitude range", lower_mag, upper_mag,
+                        value=(lower_mag, upper_mag), step=0.1, key="global_mag")
+        days = st.date_input("UTC date range", (min_day, max_day),
+                             min_value=min_day, max_value=max_day, key="global_days")
+        ten = st.checkbox("Include depths recorded as exactly 10 km", True, key="global_ten")
+        hemi = st.multiselect("Hemisphere", ["Northern", "Southern"],
+                              default=["Northern", "Southern"], key="global_hemi")
+        st.divider()
+        st.caption("These common filters affect the nine primary visualizations and "
+                   "the ML event view. The dedicated 6 February section uses its "
+                   "own regional UTC window so the historical reference remains visible.")
 
-        v_p, v_s = 6.0, 3.5
-        hypo_p = v_p * elapsed_sec
-        hypo_s = v_s * elapsed_sec
-        r_p_km = float(np.sqrt(max(0.0, hypo_p**2 - ep_depth**2)))
-        r_s_km = float(np.sqrt(max(0.0, hypo_s**2 - ep_depth**2)))
-        area_s_km2 = np.pi * (r_s_km ** 2)
-        area_p_km2 = np.pi * (r_p_km ** 2)
+    filtered = filter_catalog(all_data, mag, days, ten, hemi)
+    st.markdown(
+        '<div class="ss-hero">'
+        '<div class="ss-hero-body"><div class="ss-eyebrow">GLOBAL SEISMIC INTELLIGENCE · HISTORICAL OBSERVATORY</div>'
+        '<h1 class="ss-hero-title">SEISMOSCOPE</h1>'
+        '<p class="ss-hero-sub">Earthquake Data Exploration &amp; Machine Learning'
+        ' · Reviewed USGS Catalog</p></div>'
+        '<div class="ss-hero-window"><div class="ss-window-label">OBSERVATION WINDOW · UTC</div>'
+        f'<div class="ss-window-value">{min_day:%d %b %Y} – {max_day:%d %b %Y}</div></div>'
+        '</div>', unsafe_allow_html=True,
+    )
+    a, b, c = st.columns(3)
+    a.metric("Earthquakes selected", f"{len(filtered):,}")
+    b.metric("Maximum magnitude", f"{filtered['mag'].max():.1f}" if not filtered.empty else "—")
+    c.metric("Median depth", f"{filtered['depth'].median():.1f} km" if not filtered.empty else "—")
 
-        cities = [
-            ("Kahramanmaraş", 37.575, 36.922),
-            ("Gaziantep", 37.066, 37.378),
-            ("Osmaniye", 37.074, 36.246),
-            ("Adıyaman", 37.764, 38.278),
-            ("Kilis", 36.718, 37.121),
-            ("Hatay (Antakya)", 36.202, 36.160),
-            ("Malatya", 38.355, 38.309),
-            ("Adana", 37.000, 35.321),
-            ("Şanlıurfa", 37.159, 38.796),
-            ("Mersin", 36.812, 34.641),
-            ("Diyarbakır", 37.914, 40.230),
-            ("Kayseri", 38.731, 35.478)
-        ]
+    overview_tab, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "⌂ Overview", "◎ Geographic", "▥ Statistical & Temporal",
+        "◈ Multidimensional & 3D", "◇ Machine Learning", "◉ Türkiye · Feb 2023",
+    ])
+    with overview_tab:
+        show_overview(filtered, all_data)
+    with tab1:
+        show_geographic(filtered)
+    with tab2:
+        show_statistical(filtered, all_data, days)
+    with tab3:
+        show_multidimensional(filtered)
+    with tab4:
+        show_ml(filtered)
+    with tab5:
+        show_february_6(all_data)
+    st.divider()
+    st.caption(f"Source: reviewed USGS ANSS ComCat historical catalog · "
+               f"{len(all_data):,} M4.5+ events · all dates UTC. "
+               "Charts summarize observations, not future earthquake predictions or hazard forecasts.")
 
-        def haversine_km(lat1, lon1, lat2, lon2):
-            R = 6371.0
-            phi1, phi2 = np.radians(lat1), np.radians(lat2)
-            dphi = np.radians(lat2 - lat1)
-            dlambda = np.radians(lon2 - lon1)
-            a = np.sin(dphi / 2.0)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0)**2
-            return 2 * R * np.arcsin(np.sqrt(a))
 
-        city_rows = []
-        for c_name, c_lat_i, c_lon_i in cities:
-            epi_dist = haversine_km(ep_lat, ep_lon, c_lat_i, c_lon_i)
-            hypo_dist = np.sqrt(epi_dist**2 + ep_depth**2)
-            t_p = hypo_dist / v_p
-            t_s = hypo_dist / v_s
-            if elapsed_sec >= t_s:
-                status = "🔴 Yıkıcı S-Dalgası Ulaştı"
-            elif elapsed_sec >= t_p:
-                status = "🟠 Öncü P-Dalgası Ulaştı"
-            else:
-                status = "🟢 Henüz Ulaşmadı"
-            city_rows.append({
-                "Şehir": c_name,
-                "lat": c_lat_i,
-                "lon": c_lon_i,
-                "Merkez Üssüne Mesafe (km)": round(epi_dist, 1),
-                "P-Dalgası Varış (sn)": round(t_p, 1),
-                "Yıkıcı S-Dalgası Varış (sn)": round(t_s, 1),
-                "Erken Uyarı Süresi (S-P Farkı sn)": round(t_s - t_p, 1),
-                "Anlık Durum": status
-            })
-        city_df = pd.DataFrame(city_rows).sort_values("Merkez Üssüne Mesafe (km)")
-        hit_cities_count = len(city_df[city_df["Anlık Durum"] == "🔴 Yıkıcı S-Dalgası Ulaştı"])
-
-        sk1, sk2, sk3, sk4 = st.columns(4)
-        sk1.metric(f"{elapsed_sec}. Saniyede Yıkıcı Dalga Yarıçapı", f"{r_s_km:,.1f} km", "S-Dalgası (3.5 km/sn)")
-        sk2.metric(f"{elapsed_sec}. Saniyede Sarsılan Toplam Alan", f"{area_s_km2:,.0f} km²", f"P-Dalgası Alanı: {area_p_km2:,.0f} km²")
-        sk3.metric("Öncü P-Dalgası Yarıçapı", f"{r_p_km:,.1f} km", "Birincil Dalga (6.0 km/sn)")
-        sk4.metric("Sarsıntının Ulaştığı İl Merkezleri", f"{hit_cities_count} / {len(cities)} İl", f"t = {elapsed_sec} saniye")
-
-        def make_wave_ring(lat_c, lon_c, radius_km, n_pts=100):
-            angles = np.linspace(0, 2 * np.pi, n_pts)
-            d_lat = (radius_km / 111.32) * np.cos(angles)
-            d_lon = (radius_km / (111.32 * np.cos(np.radians(lat_c)))) * np.sin(angles)
-            return lat_c + d_lat, lon_c + d_lon
-
-        col_wave_map, col_wave_chart = st.columns([3, 2])
-
-        with col_wave_map:
-            s_lats, s_lons = make_wave_ring(ep_lat, ep_lon, r_s_km)
-            p_lats, p_lons = make_wave_ring(ep_lat, ep_lon, r_p_km)
-
-            ring_df = pd.DataFrame({
-                'lat': np.concatenate([p_lats, s_lats]),
-                'lon': np.concatenate([p_lons, s_lons]),
-                'Dalga Tipi': [f'Öncü P-Dalgası Cephesi ({r_p_km:.0f} km)'] * len(p_lats) + [f'Yıkıcı S-Dalgası Cephesi ({r_s_km:.0f} km)'] * len(s_lats)
-            })
-
-            use_new_api = hasattr(px, "line_map")
-            line_fn = px.line_map if use_new_api else px.line_mapbox
-
-            fig_wave = line_fn(
-                ring_df, lat="lat", lon="lon", color="Dalga Tipi",
-                color_discrete_sequence=["#0284c7", "#e11d48"],
-                zoom=5.7, center={"lat": ep_lat, "lon": ep_lon}, height=480,
-                title=f"t = {elapsed_sec}. Saniyede Sismik Dalga Cepheleri ve Etkilenen Şehirler"
-            )
-            fig_wave.update_traces(line=dict(width=3.5))
-
-            scatter_fn = px.scatter_map if use_new_api else px.scatter_mapbox
-            fig_cities = scatter_fn(
-                city_df, lat="lat", lon="lon", color="Anlık Durum",
-                hover_name="Şehir",
-                hover_data={"Merkez Üssüne Mesafe (km)": True, "Yıkıcı S-Dalgası Varış (sn)": True, "lat": False, "lon": False},
-                color_discrete_map={
-                    "🔴 Yıkıcı S-Dalgası Ulaştı": "#e11d48",
-                    "🟠 Öncü P-Dalgası Ulaştı": "#f59e0b",
-                    "🟢 Henüz Ulaşmadı": "#10b981"
-                }
-            )
-            fig_cities.update_traces(marker=dict(size=13))
-            for trace in fig_cities.data:
-                fig_wave.add_trace(trace)
-
-            layout_wave = dict(
-                margin={"r": 10, "t": 45, "l": 10, "b": 10},
-                paper_bgcolor=bg_card,
-                font=dict(color=text_primary),
-                legend=dict(orientation="h", yanchor="bottom", y=0.01, xanchor="left", x=0.01, bgcolor="rgba(255,255,255,0.8)" if is_light else "rgba(30,41,59,0.8)")
-            )
-            if use_new_api:
-                layout_wave["map_style"] = map_tile
-            else:
-                layout_wave["mapbox_style"] = map_tile
-            fig_wave.update_layout(**layout_wave)
-            st.plotly_chart(fig_wave, use_container_width=True)
-
-        with col_wave_chart:
-            fig_arr = px.bar(
-                city_df.sort_values("Merkez Üssüne Mesafe (km)", ascending=True),
-                y="Şehir", x=["P-Dalgası Varış (sn)", "Yıkıcı S-Dalgası Varış (sn)"],
-                barmode="group", orientation="h",
-                title="İllere Göre Dalga Varış Süresi (Saniye)",
-                color_discrete_sequence=["#0284c7", "#e11d48"],
-                height=480
-            )
-            fig_arr.add_vline(
-                x=elapsed_sec, line_width=2.5, line_dash="dash", line_color="#10b981",
-                annotation_text=f"Seçili An: {elapsed_sec} sn", annotation_position="top right"
-            )
-            fig_arr.update_layout(
-                paper_bgcolor=bg_card, plot_bgcolor=bg_card, font=dict(color=text_primary),
-                xaxis_title="Varış Süresi (Saniye)", yaxis_title="",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig_arr, use_container_width=True)
-
-        with st.expander("📊 İl İl Mesafe (km), Varış Süresi (sn) ve Erken Uyarı Farkı Tablosu", expanded=True):
-            st.dataframe(
-                city_df.drop(columns=["lat", "lon"]),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        ref_feb6_path = find_file("kahramanmaras_6feb_major_events_reference.csv")
-        if ref_feb6_path:
-            with st.expander("📌 6 Şubat 2023 Ana Şok ve Önemli Artçı Referans Kayıtları"):
-                ref_df = pd.read_csv(ref_feb6_path)
-                st.dataframe(ref_df, use_container_width=True)
+if __name__ == "__main__":
+    main()

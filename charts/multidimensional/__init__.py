@@ -1,0 +1,1 @@
+"""SEISMOSCOPE chart package."""
