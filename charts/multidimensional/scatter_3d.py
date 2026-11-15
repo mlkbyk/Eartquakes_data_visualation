@@ -1,4 +1,3 @@
-"""Member 2 — 3D scatter from dataviz.txt, including exact-10-km comparison."""
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
