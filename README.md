@@ -138,7 +138,7 @@ Rebuilding the prepared catalog requires the original USGS export file and shoul
 SEISMOSCOPE is a collaborative data visualization project developed by three Computer Engineering students. The visualization responsibilities below reflect the team's agreed division of work.
 
 | Contributor | Visualization area | Implemented visualizations |
-|---|---|---|
+|---|---|---|---|
 | **Member 1 — Rohat Sarıgül** | Geographic & Categorical Analysis | Geographic Map (2D, Orthographic Globe, Monthly Animation); Sankey Diagram; Sunburst Chart |`2022556051` |
 | **Member 2 — Meleksu Böyük** | Multidimensional & 3D Analysis | Treemap; Parallel Coordinates; 3D Scatter Plot | `2022556015` |
 | **Member 3 — Başak Karaman** | Statistical & Temporal Analysis | Density Contour (Overview Contours and Detailed Bins); Violin Plot; Calendar Heatmap | `2022556038` |
