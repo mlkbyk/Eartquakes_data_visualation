@@ -1,6 +1,5 @@
 # ==============================================================================
-# File Name: member2_treemap.py
-# Author: Member 2
+# File Name:treemap.py
 # Description: Treemap visualizations showing global earthquake distribution 
 #              and average magnitude across the top 15 locations.
 # ==============================================================================
