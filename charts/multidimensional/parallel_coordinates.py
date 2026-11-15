@@ -1,5 +1,3 @@
-"""Member 2 — 6-axis Parallel Coordinates from original dataviz.txt notebook.""" 
-
 import pandas as pd
 import plotly.graph_objects as go
 
