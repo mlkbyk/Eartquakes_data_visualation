@@ -1,6 +1,4 @@
-"""Member 2 — location Treemap from dataviz.txt final version.
-
-The original Colab implementation used the most common 15 place strings and
+"""The original Colab implementation used the most common 15 place strings and
 colored boxes by their mean recorded magnitude. A Top-N control is added here.
 """
 import pandas as pd
