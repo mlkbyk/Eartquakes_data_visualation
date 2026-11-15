@@ -87,10 +87,6 @@ SEISMOSCOPE/
 │   ├── SEISMOSCOPE_Project_Report.pdf
 │   ├── SEISMOSCOPE_Project_Presentation.pptx
 │   └── SEISMOSCOPE_Project_Presentation.pdf  # Optional PDF version
-├── team_contributions/            # Members upload independent source folders
-│   ├── Başak\SEISMOSCOPE_Statistical_Visualizations/
-│   ├── Meleksu\SEISMOSCOPE_Multidimensional_Visualizations/
-│   └── Rohat\SEISMOSCOPE_Geographic_Categorical_Visualizations/
 ├── .streamlit/config.toml
 ├── .gitignore
 ├── LICENSE
