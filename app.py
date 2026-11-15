@@ -1,7 +1,7 @@
 """SEISMOSCOPE — Seismic Intelligence v4 / six-view research dashboard.
 (3 MEMBERS CONTRİBUTED)
 Run from the SEISMOSCOPE project root:
-    python -m streamlit run app_seismic_v4.py
+    python -m streamlit run app.py
 
 The nine graded visualizations come directly from the three tested member
 packages in charts/. The ML section uses real saved training artifacts in ml/.
