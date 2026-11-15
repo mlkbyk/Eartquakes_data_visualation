@@ -1,118 +1,41 @@
-# ==============================================================================
-# File Name:treemap.py
-# Description: Treemap visualizations showing global earthquake distribution 
-#              and average magnitude across the top 15 locations.
-# ==============================================================================
-
+"""The original Colab implementation used the most common 15 place strings and
+colored boxes by their mean recorded magnitude. A Top-N control is added here.
+"""
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
-# Load the prepared earthquake dataset
-df = pd.read_csv("earthquakes_dashboard_ready.csv")
-print("Dataset Shape:", df.shape)
+FINAL_COLORS = ["#24476B", "#4C789A", "#F4C66A", "#E87555"]
 
-# ------------------------------------------------------------------------------
-# Part A: Initial Treemap - Earthquake Records by Location
-# ------------------------------------------------------------------------------
 
-# Select required columns and remove missing values
-data = df[["place", "mag", "id"]].dropna().copy()
+def summarize_locations(data: pd.DataFrame, top_n: int = 15) -> pd.DataFrame:
+    required = {"place", "mag", "id"}
+    missing = required.difference(data.columns)
+    if missing:
+        raise ValueError(f"Treemap requires: {sorted(missing)}")
+    valid = data.dropna(subset=["place", "mag", "id"])
+    summary = (valid.groupby("place", observed=True)
+               .agg(earthquake_count=("id", "count"), avg_magnitude=("mag", "mean"))
+               .reset_index().sort_values("earthquake_count", ascending=False))
+    return summary.head(top_n)
 
-# Group by location to calculate earthquake count and average magnitude
-summary = (
-    data.groupby("place")
-    .agg(
-        earthquake_count=("id", "count"),
-        avg_magnitude=("mag", "mean")
-    )
-    .reset_index()
-)
 
-# Select the top 15 locations with the highest earthquake records
-summary_top15 = summary.sort_values(
-    "earthquake_count",
-    ascending=False
-).head(15)
-
-# Create the initial Treemap
-fig_initial = px.treemap(
-    summary_top15,
-    path=["place"],
-    values="earthquake_count",
-    color="avg_magnitude",
-    color_continuous_scale="RdYlBu_r",
-    hover_data={
-        "earthquake_count": True,
-        "avg_magnitude": ":.2f"
-    },
-    title="Earthquake Records by Location"
-)
-
-fig_initial.update_layout(
-    template="plotly_white",
-    height=650,
-    title_x=0.5
-)
-
-fig_initial.show()
-
-# ------------------------------------------------------------------------------
-# Part B: Final Custom Treemap - Global Earthquake Distribution by Location
-# ------------------------------------------------------------------------------
-
-# Check for null values in target columns
-print(df[["place", "mag", "id"]].isnull().sum())
-
-# Group dataset by location and sort descending
-summary_final = (
-    df.groupby("place")
-    .agg(
-        earthquake_count=("id", "count"),
-        avg_magnitude=("mag", "mean")
-    )
-    .reset_index()
-    .sort_values("earthquake_count", ascending=False)
-)
-
-# Create the customized final Treemap with a custom color scale
-fig_final = px.treemap(
-    summary_final.head(15),
-    path=["place"],
-    values="earthquake_count",
-    color="avg_magnitude",
-    color_continuous_scale=[
-        "#24476B",
-        "#4C789A",
-        "#F4C66A",
-        "#E87555"
-    ],
-    hover_data={
-        "earthquake_count": True,
-        "avg_magnitude": ":.2f"
-    },
-    title="Global Earthquake Distribution by Location"
-)
-
-# Customize hover details and white cell borders
-fig_final.update_traces(
-    textinfo="label+value",
-    marker=dict(
-        line=dict(color="white", width=2)
-    ),
-    hovertemplate=(
-        "<b>%{label}</b><br>"
-        "Earthquake Count: %{value}<br>"
-        "Average Magnitude: %{color:.2f}"
-        "<extra></extra>"
-    )
-)
-
-fig_final.update_layout(
-    template="plotly_white",
-    height=700,
-    title_x=0.5,
-    title_font_size=23,
-    margin=dict(t=80, l=20, r=20, b=20)
-)
-
-fig_final.show()
+def create_treemap(data: pd.DataFrame, top_n: int = 15, palette: str = "Member 2 final") -> go.Figure:
+    """Area = event count; color = mean magnitude of the location label."""
+    summary = summarize_locations(data, top_n=top_n)
+    if palette not in ("Member 2 final", "RdYlBu_r"):
+        raise ValueError("Unknown palette")
+    if summary.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No valid location records match these filters.",x=0.5,y=0.5,
+                           xref="paper",yref="paper",showarrow=False)
+        return fig
+    fig = px.treemap(summary, path=["place"], values="earthquake_count",
+                     color="avg_magnitude",
+                     color_continuous_scale=FINAL_COLORS if palette == "Member 2 final" else "RdYlBu_r",
+                     hover_data={"earthquake_count": True, "avg_magnitude": ":.2f"},
+                     title=f"Global earthquake records by location — Top {len(summary)}", height=580)
+    fig.update_traces(textinfo="label+value", marker=dict(line=dict(color="white", width=2)),
+        hovertemplate="<b>%{label}</b><br>Earthquake count: %{value:,}<br>Average magnitude: %{color:.2f} M<extra></extra>")
+    fig.update_layout(margin=dict(l=12,r=12,t=56,b=12),title_x=0.5)
+    return fig
