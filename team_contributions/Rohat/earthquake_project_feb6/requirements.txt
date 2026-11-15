@@ -1,6 +1,0 @@
-# Data preparation uses the Python 3 standard library only.
-# Recommended dashboard dependencies (install when building app.py):
-streamlit>=1.30
-plotly>=5.20
-numpy>=1.26
-scikit-learn>=1.4
