@@ -1,6 +1,5 @@
 # ==============================================================================
-# File Name: member2_scatter_3d.py
-# Author: Member 2
+# File Name:scatter_3d.py
 # Description: 3D Scatter Plots of global earthquake distribution comparing 
 #              datasets with and without fixed 10km depth records.
 # ==============================================================================
