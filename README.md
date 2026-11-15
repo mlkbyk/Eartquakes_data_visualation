@@ -88,9 +88,9 @@ SEISMOSCOPE/
 │   ├── SEISMOSCOPE_Project_Presentation.pptx
 │   └── SEISMOSCOPE_Project_Presentation.pdf  # Optional PDF version
 ├── team_contributions/            # Members upload independent source folders
-│   ├── member_1_rohat/            # Added by Member 1
-│   ├── member_2_meleksu/          # Added by Member 2
-│   └── member_3_basak/            # Added by Member 3
+│   ├── Başak\SEISMOSCOPE_Statistical_Visualizations/
+│   ├── Meleksu\SEISMOSCOPE_Multidimensional_Visualizations/
+│   └── Rohat\SEISMOSCOPE_Geographic_Categorical_Visualizations/
 ├── .streamlit/config.toml
 ├── .gitignore
 ├── LICENSE
@@ -138,10 +138,10 @@ Rebuilding the prepared catalog requires the original USGS export file and shoul
 SEISMOSCOPE is a collaborative data visualization project developed by three Computer Engineering students. The visualization responsibilities below reflect the team's agreed division of work.
 
 | Contributor | Visualization area | Implemented visualizations |
-|---|---|---|
-| **Member 1 — Rohat Sarıgül** | Geographic & Categorical Analysis | Geographic Map (2D, Orthographic Globe, Monthly Animation); Sankey Diagram; Sunburst Chart |
-| **Member 2 — Meleksu Böyük** | Multidimensional & 3D Analysis | Treemap; Parallel Coordinates; 3D Scatter Plot |
-| **Member 3 — Başak Karaman** | Statistical & Temporal Analysis | Density Contour (Overview Contours and Detailed Bins); Violin Plot; Calendar Heatmap |
+| :--- | :--- | :--- |
+| **Member 1 — Rohat Sarıgül** (`2022556051`) | Geographic & Categorical Analysis | Geographic Map (2D, Orthographic Globe, Monthly Animation); Sankey Diagram; Sunburst Chart |
+| **Member 2 — Meleksu Böyük** (`2022556015`) | Multidimensional & 3D Analysis | Treemap; Parallel Coordinates; 3D Scatter Plot |
+| **Member 3 — Başak Karaman** (`2022556038`) | Statistical & Temporal Analysis | Density Contour (Overview Contours and Detailed Bins); Violin Plot; Calendar Heatmap |
 
 The final integrated dashboard combines all nine member visualizations with exploratory machine-learning results and the 6 February 2023 Türkiye case study. Shared tasks such as data preparation, ML training, dashboard integration and documentation should be credited to the individuals who actually carried them out; no individual attribution for these tasks is asserted here.
 
