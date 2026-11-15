@@ -1,4 +1,4 @@
-"""Smoke tests for Member 2's chart functions. Run: python -m unittest discover -s tests -v"""
+"""Test for number 2-"""
 import unittest
 from pathlib import Path
 import pandas as pd
