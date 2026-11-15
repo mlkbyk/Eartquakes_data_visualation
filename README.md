@@ -139,9 +139,9 @@ SEISMOSCOPE is a collaborative data visualization project developed by three Com
 
 | Contributor | Visualization area | Implemented visualizations |
 |---|---|---|
-| **Member 1 — Rohat Sarıgül** | Geographic & Categorical Analysis | Geographic Map (2D, Orthographic Globe, Monthly Animation); Sankey Diagram; Sunburst Chart |
-| **Member 2 — Meleksu Böyük** | Multidimensional & 3D Analysis | Treemap; Parallel Coordinates; 3D Scatter Plot |
-| **Member 3 — Başak Karaman** | Statistical & Temporal Analysis | Density Contour (Overview Contours and Detailed Bins); Violin Plot; Calendar Heatmap |
+| **Member 1 — Rohat Sarıgül** | Geographic & Categorical Analysis | Geographic Map (2D, Orthographic Globe, Monthly Animation); Sankey Diagram; Sunburst Chart |2022556051
+| **Member 2 — Meleksu Böyük** | Multidimensional & 3D Analysis | Treemap; Parallel Coordinates; 3D Scatter Plot |2022556015
+| **Member 3 — Başak Karaman** | Statistical & Temporal Analysis | Density Contour (Overview Contours and Detailed Bins); Violin Plot; Calendar Heatmap |2022556038
 
 The final integrated dashboard combines all nine member visualizations with exploratory machine-learning results and the 6 February 2023 Türkiye case study. Shared tasks such as data preparation, ML training, dashboard integration and documentation should be credited to the individuals who actually carried them out; no individual attribution for these tasks is asserted here.
 
