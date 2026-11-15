@@ -1,6 +1,5 @@
 
 """SEISMOSCOPE | Shared Plotly Chart Style."""
-
 import plotly.graph_objects as go
 
 
