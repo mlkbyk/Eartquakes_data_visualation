@@ -1,90 +1,42 @@
-# ==============================================================================
-#parallel_coordinates.py
-# Description: Parallel Coordinates plot for multidimensional earthquake 
-#              analysis across magnitude, depth, and measurement quality metrics.
-# ==============================================================================
+"""Member 2 — 6-axis Parallel Coordinates from original dataviz.txt notebook.""" 
 
 import pandas as pd
 import plotly.graph_objects as go
 
-# Load the prepared earthquake dataset
-df = pd.read_csv("earthquakes_dashboard_ready.csv")
+PARAMETERS = ["mag", "depth", "rms", "gap", "nst", "magError"]
+AXIS_NAMES = ["Magnitude (M)", "Depth (km)", "RMS (s)",
+              "Azimuthal gap (°)", "Number of stations", "Magnitude error"]
+FINAL_SCALE = [[0, "#24476B"], [0.35, "#4C789A"],
+               [0.65, "#F4C66A"], [1, "#E87555"]]
 
-# Define the columns required for multidimensional analysis
-columns = [
-    "mag",
-    "depth",
-    "rms",
-    "gap",
-    "nst",
-    "magError"
-]
 
-# Remove rows with missing values in the selected columns
-parallel_df = df[columns].dropna().copy()
+def complete_measurements(data: pd.DataFrame) -> pd.DataFrame:
+    missing = set(PARAMETERS).difference(data.columns)
+    if missing:
+        raise ValueError(f"Parallel Coordinates requires: {sorted(missing)}")
+    result = data[PARAMETERS].copy()
+    for col in PARAMETERS:
+        result[col] = pd.to_numeric(result[col], errors="coerce")
+    return result.dropna()
 
-print("Original records:", len(df))
-print("Records used:", len(parallel_df))
-print("Removed records:", len(df) - len(parallel_df))
 
-# Build the Parallel Coordinates figure
-fig = go.Figure(
-    data=go.Parcoords(
-        line=dict(
-            color=parallel_df["mag"],
-            colorscale=[
-                [0, "#24476B"],
-                [0.35, "#4C789A"],
-                [0.65, "#F4C66A"],
-                [1, "#E87555"]
-            ],
-            cmin=parallel_df["mag"].min(),
-            cmax=parallel_df["mag"].max(),
-            colorbar=dict(title="Magnitude"),
-            showscale=True
-        ),
-        dimensions=[
-            dict(
-                label="Magnitude",
-                values=parallel_df["mag"]
-            ),
-            dict(
-                label="Depth (km)",
-                values=parallel_df["depth"]
-            ),
-            dict(
-                label="RMS",
-                values=parallel_df["rms"]
-            ),
-            dict(
-                label="Azimuthal Gap",
-                values=parallel_df["gap"]
-            ),
-            dict(
-                label="Number of Stations",
-                values=parallel_df["nst"]
-            ),
-            dict(
-                label="Magnitude Error",
-                values=parallel_df["magError"]
-            )
-        ]
-    )
-)
-
-# Configure layout, title, and margins
-fig.update_layout(
-    title=dict(
-        text=(
-            "Multidimensional Earthquake Analysis"
-            "<br><sup>Magnitude, Depth and Measurement Quality</sup>"
-        ),
-        x=0.5
-    ),
-    template="plotly_white",
-    height=700,
-    margin=dict(l=100, r=100, t=110, b=70),
-    font=dict(family="Arial", size=12)
-)
-
-fig.show()
+def create_parallel_coordinates(data: pd.DataFrame) -> go.Figure:
+    """Each polyline represents an earthquake with six nonmissing measurements."""
+    full = complete_measurements(data)
+    if full.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No records have all six required measurements.",x=0.5,y=0.5,
+                           xref="paper",yref="paper",showarrow=False)
+        return fig
+    lo, hi = float(full.mag.min()), float(full.mag.max())
+    if hi <= lo:
+        hi = lo + 0.01
+    fig = go.Figure(go.Parcoords(
+        line=dict(color=full["mag"], colorscale=FINAL_SCALE,
+                  cmin=lo,cmax=hi,showscale=True,colorbar=dict(title="Magnitude (M)")),
+        dimensions=[dict(label=label, values=full[col])
+                    for col,label in zip(PARAMETERS, AXIS_NAMES)]
+    ))
+    fig.update_layout(title="Multidimensional earthquake and measurement-quality analysis",
+                      height=620, margin=dict(l=75,r=75,t=90,b=50))
+    return fig
